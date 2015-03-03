@@ -44,6 +44,9 @@
 
 #define DEFAULT_INNER_BUTTON_BORDER 3
 
+//this is defined twice
+#define C_DESKTOP_TITLEBAR_SCROLL_ACTION_ZOOM 123123
+
 static void meta_frames_destroy       (GtkWidget       *object);
 static void meta_frames_finalize      (GObject         *object);
 static void meta_frames_style_updated (GtkWidget       *widget);
@@ -1315,6 +1318,20 @@ meta_frame_titlebar_event (MetaUIFrame    *frame,
       }
       break;
 
+    case C_DESKTOP_TITLEBAR_SCROLL_ACTION_ZOOM:  //3D
+      {
+        int ZOOM_STEP = 5;  //this value should be saved... where?
+        if (event->button == MOUSEWHEEL_UP) {
+            meta_core_zoom_relative (display,
+                                     frame->xwindow,
+                                     +ZOOM_STEP);
+        } else {
+            meta_core_zoom_relative (display,
+                                     frame->xwindow,
+                                     -ZOOM_STEP);
+        }
+      }
+      
     case C_DESKTOP_TITLEBAR_SCROLL_ACTION_NONE:
       break;
     }

@@ -111,6 +111,8 @@ struct _MetaWindow
   Colormap colormap;
   char *desc; /* used in debug spew */
   char *title;
+  
+  int z; //3D depth
 
   char *icon_name;
   GdkPixbuf *icon;
@@ -566,6 +568,10 @@ void        meta_window_unshade            (MetaWindow  *window,
                                             guint32      timestamp);
 void        meta_window_adjust_opacity     (MetaWindow  *window,
                                             gboolean     increase);
+void        meta_window_zoom_to            (MetaWindow  *window,
+                                            int          new_z);
+void        meta_window_zoom_relative      (MetaWindow  *window,
+                                            int          delta_z);
 void        meta_window_change_workspace   (MetaWindow  *window,
                                             MetaWorkspace *workspace);
 void        meta_window_stick              (MetaWindow  *window);

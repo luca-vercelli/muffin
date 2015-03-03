@@ -34,4 +34,22 @@ void meta_window_place (MetaWindow *window,
                         int        *new_x,
                         int        *new_y);
 
+void
+meta_window_get_real_coords (MetaWindow        *window,
+                             int               *rx,
+                             int               *ry,
+                             int               *rz,
+                             int               *rw,
+                             int               *rh,
+                             double            *scale);
+
+void
+meta_window_calc_apparent_coords (MetaWindow  *window,
+                                  int rx, int ry, int rz, int rw, int rh,
+                                  int *x,
+                                  int *y,
+                                  int *w,
+                                  int *h,
+                                  double *scale);
+                                  
 #endif

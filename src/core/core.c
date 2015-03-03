@@ -506,6 +506,26 @@ meta_core_adjust_opacity      (Display *xdisplay,
 }
 
 LOCAL_SYMBOL void
+meta_core_zoom_to (Display *xdisplay,
+                   Window   frame_xwindow,
+                   int new_z)
+{
+  MetaWindow *window = meta_core_get_window (xdisplay, frame_xwindow);
+
+  meta_window_zoom_to (window, new_z);
+}
+
+LOCAL_SYMBOL void
+meta_core_zoom_relative (Display *xdisplay,
+                         Window   frame_xwindow,
+                         int delta_z)
+{
+  MetaWindow *window = meta_core_get_window (xdisplay, frame_xwindow);
+
+  meta_window_zoom_relative (window, delta_z);
+}
+
+LOCAL_SYMBOL void
 meta_core_stick (Display *xdisplay,
                  Window   frame_xwindow)
 {

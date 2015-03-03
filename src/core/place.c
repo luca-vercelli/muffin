@@ -1039,3 +1039,76 @@ meta_window_place (MetaWindow        *window,
   *new_x = x;
   *new_y = y;
 }
+
+/**
+* meta_window_get_real_coords
+* return the "real" 3D coordinates of this MetaWindow
+* if z=0 these are the normal coordinates
+*/
+void
+meta_window_get_real_coords (MetaWindow        *window,
+                             int               *rx,
+                             int               *ry,
+                             int               *rz,
+                             int               *rw,
+                             int               *rh,
+                             double            *scale)
+{
+  //These data should be saved ... where?
+  int screen_w = window->screen->rect.width;
+  int screen_h = window->screen->rect.height;
+  int c_x = screen_w / 2;
+  int c_y = screen_h / 4;
+  int c_z = -screen_w;
+  
+  //These are the apparent coordinates:
+  int x, y, w, h;
+  meta_window_get_position (window, &x, &y);
+  w = window->rect.width;
+  h = window->rect.height;
+  
+  *rz = window->z;
+
+  // (z-c_z) : (c_x-x) = (0-c_z) : (c_x-x')
+  // if z=0 then rx=x, ry=y, rw=w,rh=h
+  *scale = (*rz-c_z) / (-c_z);
+  *rx = c_x - *scale * (c_x-x);
+  *ry = c_y - *scale * (c_y-y);
+  *rw = *scale * w;
+  *rh = *scale * h;
+  
+}
+
+/**
+* meta_window_calc_apparent_coords
+* return the "apparent" 2D coordinates of this MetaWindow,
+* given its "real" 3D coordinates
+* if z=0 these are the normal coordinates
+*/
+void
+meta_window_calc_apparent_coords (MetaWindow  *window,
+                                  int rx, int ry, int rz, int rw, int rh,
+                                  int *x,
+                                  int *y,
+                                  int *w,
+                                  int *h,
+                                  double *scale)
+{
+  //These data should be saved ... where?
+  int screen_w = window->screen->rect.width;
+  int screen_h = window->screen->rect.height;
+  int c_x = screen_w / 2;
+  int c_y = screen_h / 4;
+  int c_z = -screen_w;
+  
+  //These are the apparent coordinates:
+  // (z-c_z) : (c_x-x) = (0-c_z) : (c_x-x')
+  // if z=0 then rx=x, ry=y, rw=w,rh=h
+  *scale = (rz-c_z) / (-c_z);
+  *x = c_x - (c_x-rx) / *scale;
+  *y = c_y - (c_y-ry) / *scale;
+  *w = rw / *scale;
+  *h = rh / *scale;
+  
+}
+

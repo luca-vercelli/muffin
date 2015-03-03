@@ -5493,6 +5493,70 @@ meta_window_resize_with_gravity (MetaWindow *window,
                                     x, y, w, h);
 }
 
+/**
+ * meta_window_zoom_to:
+ * @window: a #MetaWindow
+ * @new_z: final z position
+ *
+ * Move window along z.
+ */
+void
+meta_window_zoom_to (MetaWindow  *window,
+                     int          new_z)
+{
+  g_return_if_fail (!window->override_redirect);
+  
+  int rx, ry, rz, rw, rh;
+  double scale;
+  meta_window_get_real_coords (window, &rx, &ry, &rz, &rw, &rh, &scale);
+  
+  rz = new_z;
+  int x, y, w, h;
+  meta_window_calc_apparent_coords (window,
+                                    rx,ry, rz, rw, rh,
+                                    &x, &y, &w, &h, &scale);
+                                    
+  MetaMoveResizeFlags flags;
+  flags = META_IS_MOVE_ACTION | META_IS_RESIZE_ACTION ;
+  meta_window_move_resize_internal (window,
+                                    flags,
+                                    NorthWestGravity,
+                                    x, y, w, h);
+  window->z = rz;
+}
+
+/**
+ * meta_window_zoom_relative:
+ * @window: a #MetaWindow
+ * @delta_z: step along z axis
+ *
+ * Move window along z.
+ */
+void
+meta_window_zoom_relative (MetaWindow  *window,
+                           int          delta_z)
+{
+  g_return_if_fail (!window->override_redirect);
+  
+  int rx, ry, rz, rw, rh;
+  double scale;
+  meta_window_get_real_coords (window, &rx, &ry, &rz, &rw, &rh, &scale);
+  
+  rz = rz + delta_z;
+  int x, y, w, h;
+  meta_window_calc_apparent_coords (window,
+                                    rx,ry, rz, rw, rh,
+                                    &x, &y, &w, &h, &scale);
+                                    
+  MetaMoveResizeFlags flags;
+  flags = META_IS_MOVE_ACTION | META_IS_RESIZE_ACTION ;
+  meta_window_move_resize_internal (window,
+                                    flags,
+                                    NorthWestGravity,
+                                    x, y, w, h);
+  window->z = rz;
+}
+
 static void
 meta_window_move_resize_now (MetaWindow  *window)
 {

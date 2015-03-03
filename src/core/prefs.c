@@ -68,6 +68,9 @@
 
 #define SETTINGS(s) g_hash_table_lookup (settings_schemas, (s))
 
+//this is defined twice
+#define C_DESKTOP_TITLEBAR_SCROLL_ACTION_ZOOM 123123
+
 static GList *changes = NULL;
 static guint changed_idle;
 static GList *listeners = NULL;
@@ -86,7 +89,7 @@ static gboolean workspace_cycle = FALSE;
 static CDesktopTitlebarAction action_double_click_titlebar = C_DESKTOP_TITLEBAR_ACTION_TOGGLE_MAXIMIZE;
 static CDesktopTitlebarAction action_middle_click_titlebar = C_DESKTOP_TITLEBAR_ACTION_LOWER;
 static CDesktopTitlebarAction action_right_click_titlebar = C_DESKTOP_TITLEBAR_ACTION_MENU;
-static CDesktopTitlebarScrollAction action_scroll_titlebar = C_DESKTOP_TITLEBAR_SCROLL_ACTION_NONE;
+static CDesktopTitlebarScrollAction action_scroll_titlebar = C_DESKTOP_TITLEBAR_SCROLL_ACTION_ZOOM;
 static gboolean dynamic_workspaces = FALSE;
 static gboolean unredirect_fullscreen_windows = FALSE;
 static gboolean application_based = FALSE;
