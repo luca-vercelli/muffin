@@ -24,6 +24,12 @@
  * 02110-1335, USA.
  */
 
+/**
+ * SECTION:prefs
+ * @title: Preferences
+ * @short_description: Muffin preferences
+ */
+
 #include <config.h>
 #include <meta/prefs.h>
 #include "ui.h"
@@ -44,7 +50,7 @@
  */
 #define KEY_TITLEBAR_FONT "titlebar-font"
 #define KEY_NUM_WORKSPACES "num-workspaces"
-#define KEY_WORKSPACE_NAMES "workspace-name-overrides"
+#define KEY_WORKSPACE_NAMES "workspace-names"
 #define KEY_WORKSPACE_CYCLE "workspace-cycle"
 
 /* Keys from "foreign" schemas */
@@ -57,14 +63,15 @@
 #define KEY_WS_NAMES_GNOME "workspace-names"
 #define KEY_LIVE_HIDDEN_WINDOWS "live-hidden-windows"
 #define KEY_WORKSPACES_ONLY_ON_PRIMARY "workspaces-only-on-primary"
-#define KEY_NO_TAB_POPUP "no-tab-popup"
+
+#define KEY_MOUSEWHEEL_ZOOM_ENABLED "screen-magnifier-enabled"
 
 /* These are the different schemas we are keeping
  * a GSettings instance for */
 #define SCHEMA_GENERAL         "org.cinnamon.desktop.wm.preferences"
-#define SCHEMA_CINNAMON          "org.cinnamon"
 #define SCHEMA_MUFFIN          "org.cinnamon.muffin"
 #define SCHEMA_INTERFACE       "org.cinnamon.desktop.interface"
+#define SCHEMA_A11Y_APPLICATIONS "org.cinnamon.desktop.a11y.applications"
 
 #define SETTINGS(s) g_hash_table_lookup (settings_schemas, (s))
 
@@ -79,6 +86,8 @@ static GHashTable *settings_schemas;
 static gboolean use_system_font = FALSE;
 static PangoFontDescription *titlebar_font = NULL;
 static MetaVirtualModifier mouse_button_mods = Mod1Mask;
+static MetaVirtualModifier mouse_button_zoom_mods = Mod1Mask;
+static gboolean mouse_zoom_enabled = FALSE;
 static CDesktopFocusMode focus_mode = C_DESKTOP_FOCUS_MODE_CLICK;
 static CDesktopFocusNewWindows focus_new_windows = C_DESKTOP_FOCUS_NEW_WINDOWS_SMART;
 static gboolean raise_on_click = TRUE;
@@ -121,7 +130,6 @@ static char **workspace_names = NULL;
 static gboolean live_hidden_windows = FALSE;
 static gboolean workspaces_only_on_primary = FALSE;
 
-static gboolean no_tab_popup = FALSE;
 static gboolean legacy_snap = FALSE;
 static gboolean invert_workspace_flip = FALSE;
 static gboolean tile_maximize = FALSE;
@@ -149,6 +157,7 @@ static void maybe_give_disable_workarounds_warning (void);
 static gboolean titlebar_handler (GVariant*, gpointer*, gpointer);
 static gboolean theme_name_handler (GVariant*, gpointer*, gpointer);
 static gboolean mouse_button_mods_handler (GVariant*, gpointer*, gpointer);
+static gboolean mouse_button_zoom_mods_handler (GVariant*, gpointer*, gpointer);
 static gboolean snap_modifier_handler (GVariant*, gpointer*, gpointer);
 static gboolean button_layout_handler (GVariant*, gpointer*, gpointer);
 
@@ -379,6 +388,13 @@ static MetaBoolPreference preferences_bool[] =
       &gnome_accessibility,
     },
     {
+      { KEY_MOUSEWHEEL_ZOOM_ENABLED,
+        SCHEMA_A11Y_APPLICATIONS,
+        META_PREF_MOUSE_ZOOM_ENABLED,
+      },
+      &mouse_zoom_enabled,
+    },
+    {
       { KEY_GNOME_ANIMATIONS,
         SCHEMA_INTERFACE,
         META_PREF_GNOME_ANIMATIONS,
@@ -414,13 +430,6 @@ static MetaBoolPreference preferences_bool[] =
       &workspaces_only_on_primary,
     },
     {
-      { KEY_NO_TAB_POPUP,
-        SCHEMA_MUFFIN,
-        META_PREF_NO_TAB_POPUP,
-      },
-      &no_tab_popup,
-    },
-    {
       { "legacy-snap",
         SCHEMA_MUFFIN,
         META_PREF_LEGACY_SNAP,
@@ -452,6 +461,14 @@ static MetaStringPreference preferences_string[] =
         META_PREF_MOUSE_BUTTON_MODS,
       },
       mouse_button_mods_handler,
+      NULL,
+    },
+    {
+      { "mouse-button-zoom-modifier",
+        SCHEMA_GENERAL,
+        META_PREF_MOUSE_BUTTON_ZOOM_MODS,
+      },
+      mouse_button_zoom_mods_handler,
       NULL,
     },
     {
@@ -928,10 +945,6 @@ meta_prefs_init (void)
   g_signal_connect (settings, "changed", G_CALLBACK (settings_changed), NULL);
   g_hash_table_insert (settings_schemas, g_strdup (SCHEMA_MUFFIN), settings);
 
-  settings = g_settings_new (SCHEMA_CINNAMON);
-  g_signal_connect (settings, "changed", G_CALLBACK (settings_changed), NULL);
-  g_hash_table_insert (settings_schemas, g_strdup (SCHEMA_CINNAMON), settings);
-
   /* Individual keys we watch outside of our schemas */
   settings = g_settings_new (SCHEMA_INTERFACE);
   g_signal_connect (settings, "changed::" KEY_GNOME_ACCESSIBILITY,
@@ -944,6 +957,10 @@ meta_prefs_init (void)
                     G_CALLBACK (settings_changed), NULL);
   g_hash_table_insert (settings_schemas, g_strdup (SCHEMA_INTERFACE), settings);
 
+  settings = g_settings_new (SCHEMA_A11Y_APPLICATIONS);
+  g_signal_connect (settings, "changed::" KEY_MOUSEWHEEL_ZOOM_ENABLED,
+                    G_CALLBACK (settings_changed), NULL);
+  g_hash_table_insert (settings_schemas, g_strdup (SCHEMA_A11Y_APPLICATIONS), settings);
 
   for (tmp = overridden_keys; tmp; tmp = tmp->next)
     {
@@ -1135,9 +1152,6 @@ settings_changed (GSettings *settings,
       return;
     }
 
-  if (strcmp(schema, SCHEMA_CINNAMON) == 0)
-    return;
-
   value = g_settings_get_value (settings, key);
   type = g_variant_get_type (value);
 
@@ -1213,6 +1227,18 @@ MetaVirtualModifier
 meta_prefs_get_mouse_button_mods  (void)
 {
   return mouse_button_mods;
+}
+
+MetaVirtualModifier
+meta_prefs_get_mouse_button_zoom_mods  (void)
+{
+  return mouse_button_zoom_mods;
+}
+
+gboolean
+meta_prefs_get_mouse_zoom_enabled (void)
+{
+  return mouse_zoom_enabled;
 }
 
 CDesktopFocusMode
@@ -1360,6 +1386,42 @@ mouse_button_mods_handler (GVariant *value,
     {
       mouse_button_mods = mods;
       queue_changed (META_PREF_MOUSE_BUTTON_MODS);
+    }
+
+  return TRUE;
+}
+
+static gboolean
+mouse_button_zoom_mods_handler (GVariant *value,
+                                gpointer *result,
+                                gpointer  data)
+{
+  MetaVirtualModifier mods;
+  const gchar *string_value;
+
+  *result = NULL; /* ignored */
+  string_value = g_variant_get_string (value, NULL);
+
+  if (!string_value || !meta_ui_parse_modifier (string_value, &mods))
+    {
+      meta_topic (META_DEBUG_KEYBINDINGS,
+                  "Failed to parse new GSettings value\n");
+
+      meta_warning (_("\"%s\" found in configuration database is "
+                      "not a valid value for mouse button zoom modifier\n"),
+                    string_value);
+
+      return FALSE;
+    }
+
+  meta_topic (META_DEBUG_KEYBINDINGS,
+              "Mouse zoom modifier has new GSettings value \"%s\"\n",
+              string_value);
+
+  if (mods != mouse_button_zoom_mods)
+    {
+      mouse_button_zoom_mods = mods;
+      queue_changed (META_PREF_MOUSE_BUTTON_ZOOM_MODS);
     }
 
   return TRUE;
@@ -1716,6 +1778,12 @@ meta_preference_to_string (MetaPreference pref)
     case META_PREF_MOUSE_BUTTON_MODS:
       return "MOUSE_BUTTON_MODS";
 
+    case META_PREF_MOUSE_BUTTON_ZOOM_MODS:
+      return "MOUSE_BUTTON_ZOOM_MODS";
+
+    case META_PREF_MOUSE_ZOOM_ENABLED:
+      return "MOUSE_ZOOM_ENABLED";
+
     case META_PREF_FOCUS_MODE:
       return "FOCUS_MODE";
 
@@ -1808,9 +1876,6 @@ meta_preference_to_string (MetaPreference pref)
 
     case META_PREF_WORKSPACE_CYCLE:
       return "WORKSPACE_CYCLE";
-
-    case META_PREF_NO_TAB_POPUP:
-      return "NO_TAB_POPUP";
 
     case META_PREF_DRAGGABLE_BORDER_WIDTH:
       return "DRAGGABLE_BORDER_WIDTH";
@@ -1981,7 +2046,7 @@ update_workspace_names (void)
   int n_workspace_names, n_names;
   gboolean changed = FALSE;
 
-  names = g_settings_get_strv (SETTINGS (SCHEMA_CINNAMON), KEY_WORKSPACE_NAMES);
+  names = g_settings_get_strv (SETTINGS (SCHEMA_GENERAL), KEY_WORKSPACE_NAMES);
   n_names = g_strv_length (names);
   n_workspace_names = workspace_names ? g_strv_length (workspace_names) : 0;
 
@@ -2086,7 +2151,7 @@ meta_prefs_change_workspace_name (int         num,
       g_variant_builder_add (&builder, "s", value);
     }
 
-  g_settings_set_value (SETTINGS (SCHEMA_CINNAMON), KEY_WORKSPACE_NAMES,
+  g_settings_set_value (SETTINGS (SCHEMA_GENERAL), KEY_WORKSPACE_NAMES,
                         g_variant_builder_end (&builder));
 }
 
@@ -2409,25 +2474,9 @@ meta_prefs_get_workspaces_only_on_primary (void)
 }
 
 gboolean
-meta_prefs_get_no_tab_popup (void)
-{
-  return no_tab_popup;
-}
-
-gboolean
 meta_prefs_get_legacy_snap (void)
 {
   return legacy_snap;
-}
-
-void
-meta_prefs_set_no_tab_popup (gboolean whether)
-{
-  MetaBasePreference *pref = NULL;
-
-  find_pref (preferences_bool, sizeof(MetaBoolPreference),
-             KEY_NO_TAB_POPUP, &pref);
-  g_settings_set_boolean (SETTINGS (pref->schema), KEY_NO_TAB_POPUP, whether);
 }
 
 int

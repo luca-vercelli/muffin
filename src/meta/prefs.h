@@ -69,7 +69,6 @@ typedef enum
   META_PREF_FORCE_FULLSCREEN,
   META_PREF_LIVE_HIDDEN_WINDOWS,
   META_PREF_WORKSPACES_ONLY_ON_PRIMARY,
-  META_PREF_NO_TAB_POPUP,
   META_PREF_DRAGGABLE_BORDER_WIDTH,
   META_PREF_TILE_HUD_THRESHOLD,
   META_PREF_RESIZE_THRESHOLD,
@@ -78,7 +77,9 @@ typedef enum
   META_PREF_INVERT_WORKSPACE_FLIP_DIRECTION,
   META_PREF_TILE_MAXIMIZE,
   META_PREF_PLACEMENT_MODE,
-  META_PREF_MIN_WIN_OPACITY
+  META_PREF_MIN_WIN_OPACITY,
+  META_PREF_MOUSE_ZOOM_ENABLED,
+  META_PREF_MOUSE_BUTTON_ZOOM_MODS
 } MetaPreference;
 
 typedef void (* MetaPrefsChangedFunc) (MetaPreference pref,
@@ -97,6 +98,8 @@ void meta_prefs_override_preference_schema (const char *key,
 const char* meta_preference_to_string (MetaPreference pref);
 
 MetaVirtualModifier         meta_prefs_get_mouse_button_mods  (void);
+MetaVirtualModifier         meta_prefs_get_mouse_button_zoom_mods (void);
+gboolean                    meta_prefs_get_mouse_zoom_enabled (void);
 guint                       meta_prefs_get_mouse_button_resize (void);
 guint                       meta_prefs_get_mouse_button_menu  (void);
 CDesktopFocusMode           meta_prefs_get_focus_mode         (void);
@@ -156,9 +159,6 @@ gboolean meta_prefs_get_live_hidden_windows (void);
 void     meta_prefs_set_live_hidden_windows (gboolean whether);
 
 gboolean meta_prefs_get_workspaces_only_on_primary (void);
-
-gboolean meta_prefs_get_no_tab_popup (void);
-void     meta_prefs_set_no_tab_popup (gboolean whether);
 
 int      meta_prefs_get_draggable_border_width (void);
 
@@ -256,6 +256,10 @@ typedef enum _MetaKeyBindingAction
   META_KEYBINDING_ACTION_MOVE_TO_WORKSPACE_UP,
   META_KEYBINDING_ACTION_MOVE_TO_WORKSPACE_DOWN,
   META_KEYBINDING_ACTION_MOVE_TO_WORKSPACE_NEW,
+  META_KEYBINDING_ACTION_MOVE_TO_MONITOR_LEFT,
+  META_KEYBINDING_ACTION_MOVE_TO_MONITOR_RIGHT,
+  META_KEYBINDING_ACTION_MOVE_TO_MONITOR_DOWN,
+  META_KEYBINDING_ACTION_MOVE_TO_MONITOR_UP,
   META_KEYBINDING_ACTION_RAISE_OR_LOWER,
   META_KEYBINDING_ACTION_RAISE,
   META_KEYBINDING_ACTION_LOWER,

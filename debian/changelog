@@ -1,3 +1,25 @@
+muffin (2.6.1) rafaela; urgency=medium
+
+  [ Dexter Chua ]
+  * Fix memory leak
+
+  [ Clement Lefebvre ]
+  * Revert "fix an issue where window turns to a solid colored rectangle during the destroy animation" (caused black borders/backgrounds in metacity themes)
+
+ -- Clement Lefebvre <root@linuxmint.com>  Sun, 31 May 2015 17:57:52 +0200
+
+muffin (2.6.0) rafaela; urgency=medium
+
+  * 2.6.0 
+
+ -- Clement Lefebvre <root@linuxmint.com>  Tue, 19 May 2015 17:29:31 +0200
+
+muffin (2.5.0) unstable; urgency=medium
+
+  * bump for development
+
+ -- Michael Webster <miketwebster@gmail.com>  Sat, 11 Apr 2015 08:46:16 -0400
+
 muffin (2.4.4) betsy; urgency=medium
 
   * Add _NET_WM_STATE_MAXIMIZED_VERT to the _NET_WM_STATE for tiled windows.

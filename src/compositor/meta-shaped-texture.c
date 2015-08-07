@@ -23,6 +23,12 @@
  * 02110-1335, USA.
  */
 
+/**
+ * SECTION:meta-shaped-texture
+ * @title: MetaShapedTexture
+ * @short_description: An actor to draw a masked texture.
+ */
+
 #include <config.h>
 
 #define CLUTTER_ENABLE_EXPERIMENTAL_API
@@ -31,6 +37,7 @@
 #include <meta/meta-shaped-texture.h>
 #include "meta-texture-tower.h"
 #include "meta-texture-rectangle.h"
+#include "cogl-utils.h"
 
 #include <clutter/clutter.h>
 #include <cogl/cogl.h>
@@ -299,12 +306,12 @@ meta_shaped_texture_ensure_mask (MetaShapedTexture *stex)
                                                          stride,
                                                          mask_data);
       else
-        priv->mask_texture = cogl_texture_new_from_data (tex_width, tex_height,
-                                                         COGL_TEXTURE_NONE,
-                                                         COGL_PIXEL_FORMAT_A_8,
-                                                         COGL_PIXEL_FORMAT_ANY,
-                                                         stride,
-                                                         mask_data);
+        priv->mask_texture = meta_cogl_texture_new_from_data_wrapper (tex_width, tex_height,
+                                                                      COGL_TEXTURE_NONE,
+                                                                      COGL_PIXEL_FORMAT_A_8,
+                                                                      COGL_PIXEL_FORMAT_ANY,
+                                                                      stride,
+                                                                      mask_data);
 
       g_free (mask_data);
 

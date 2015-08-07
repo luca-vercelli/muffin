@@ -1,7 +1,5 @@
 /* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
 
-/* Muffin Workspaces */
-
 /* 
  * Copyright (C) 2001 Havoc Pennington
  * Copyright (C) 2003 Rob Adams
@@ -22,6 +20,19 @@
  * Foundation, Inc., 51 Franklin Street - Suite 500, Boston, MA
  * 02110-1335, USA.
  */
+
+/**
+ * SECTION:workspace
+ * @title: MetaWorkspace
+ * @short_description: Workspaces
+ *
+ * A workspace is a set of windows which all live on the same
+ * screen.  (You may also see the name "desktop" around the place,
+ * which is the EWMH's name for the same thing.)  Only one workspace
+ * of a screen may be active at once; all windows on all other workspaces
+ * are unmapped.
+ */
+
 
 #include <config.h>
 #include "screen-private.h"
@@ -994,18 +1005,6 @@ ensure_work_areas_validated (MetaWorkspace *workspace)
 
   /* We're all done, YAAY!  Record that everything has been validated. */
   workspace->work_areas_invalid = FALSE;
-
-  {
-    /*
-     * Notify the compositor that the workspace geometry has changed.
-     */
-    MetaScreen     *screen = workspace->screen;
-    MetaDisplay    *display = meta_screen_get_display (screen);
-    MetaCompositor *comp = meta_display_get_compositor (display);
-
-    if (comp)
-      meta_compositor_update_workspace_geometry (comp, workspace);
-  }
 }
 
 static gboolean
@@ -1377,18 +1376,4 @@ focus_ancestor_or_top_window (MetaWorkspace *workspace,
                                               workspace->screen,
                                               timestamp);
     }
-}
-
-/**
- * meta_workspace_get_screen:
- * @workspace: a #MetaWorkspace
- *
- * Gets the #MetaScreen that the workspace is part of.
- *
- * Return value: (transfer none): the #MetaScreen for the workspace
- */
-MetaScreen *
-meta_workspace_get_screen (MetaWorkspace *workspace)
-{
-  return workspace->screen;
 }

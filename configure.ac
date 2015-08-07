@@ -1,8 +1,8 @@
 AC_PREREQ(2.50)
 
 m4_define([muffin_major_version], [2])
-m4_define([muffin_minor_version], [4])
-m4_define([muffin_micro_version], [4])
+m4_define([muffin_minor_version], [6])
+m4_define([muffin_micro_version], [1])
 
 m4_define([muffin_version],
           [muffin_major_version.muffin_minor_version.muffin_micro_version])
@@ -10,11 +10,12 @@ m4_define([muffin_version],
 m4_define([muffin_plugin_api_version], [3])
 
 AC_INIT([muffin], [muffin_version],
-        [http://bugzilla.gnome.org/enter_bug.cgi?product=muffin])
+        [https://github.com/linuxmint/muffin/issues])
 
 AC_CONFIG_SRCDIR(src/core/display.c)
 AC_CONFIG_HEADERS(config.h)
 
+AC_CONFIG_MACRO_DIR(m4)
 AM_INIT_AUTOMAKE([1.11 no-dist-gzip dist-xz tar-ustar subdir-objects])
 m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])],)
 AM_MAINTAINER_MODE([enable])
@@ -99,6 +100,11 @@ AC_ARG_ENABLE(verbose-mode,
 if test x$enable_verbose_mode = xyes; then
     AC_DEFINE(WITH_VERBOSE_MODE,1,[Build with verbose mode support])
 fi
+
+AC_ARG_ENABLE([gtk-doc],
+  AC_HELP_STRING([--enable-gtk-doc],
+                 [use gtk-doc to build documentation [[default=yes]]]),,
+  enable_gtk_doc=yes)
 
 AC_ARG_ENABLE(sm,
   AC_HELP_STRING([--disable-sm],
@@ -413,13 +419,15 @@ AM_PATH_PYTHON([2.5])
 # Use gnome-doc-utils:
 GNOME_DOC_INIT([0.8.0])
 
+GTK_DOC_CHECK([1.15], [--flavour no-tmpl])
+
 #### Warnings (last since -Werror can disturb other tests)
 
 # Stay command-line compatible with the gnome-common configure option. Here
 # minimum/yes/maximum are the same, however.
 AC_ARG_ENABLE(compile_warnings,
   AS_HELP_STRING([--enable-compile-warnings=@<:@no/minimum/yes/maximum/error@:>@],[Turn on compiler warnings]),,
-  enable_compile_warnings=error)
+  enable_compile_warnings=yes)
 
 changequote(,)dnl
 if test "$enable_compile_warnings" != no ; then
@@ -476,8 +484,11 @@ changequote([,])dnl
 
 AC_CONFIG_FILES([
 Makefile
+data/Makefile
 doc/Makefile
 doc/man/Makefile
+doc/reference/Makefile
+doc/reference/muffin-docs.sgml
 src/Makefile
 src/wm-tester/Makefile
 src/libmuffin.pc
