@@ -50,8 +50,6 @@
 static void meta_frames_destroy       (GtkWidget       *object);
 static void meta_frames_finalize      (GObject         *object);
 static void meta_frames_style_updated (GtkWidget       *widget);
-static void meta_frames_map           (GtkWidget       *widget);
-static void meta_frames_unmap         (GtkWidget       *widget);
 
 static void meta_frames_update_prelit_control (MetaFrames      *frames,
                                                MetaUIFrame     *frame,
@@ -141,9 +139,6 @@ meta_frames_class_init (MetaFramesClass *class)
 
   widget_class->style_updated = meta_frames_style_updated;
 
-  widget_class->map = meta_frames_map;
-  widget_class->unmap = meta_frames_unmap;
-  
   widget_class->draw = meta_frames_draw;
   widget_class->destroy_event = meta_frames_destroy_event;  
   widget_class->button_press_event = meta_frames_button_press_event;
@@ -242,20 +237,20 @@ static void
 update_style_contexts (MetaFrames *frames)
 {
   GtkStyleContext *style;
-  GList *variants, *variant;
+  GList *variant_list, *variant;
 
   if (frames->normal_style)
     g_object_unref (frames->normal_style);
   frames->normal_style = create_style_context (frames, NULL);
 
-  variants = g_hash_table_get_keys (frames->style_variants);
-  for (variant = variants; variant; variant = variants->next)
+  variant_list = g_hash_table_get_keys (frames->style_variants);
+  for (variant = variant_list; variant; variant = variant->next)
     {
       style = create_style_context (frames, (char *)variant->data);
       g_hash_table_insert (frames->style_variants,
                            g_strdup (variant->data), style);
     }
-  g_list_free (variants);
+  g_list_free (variant_list);
 }
 
 static void
@@ -264,10 +259,6 @@ meta_frames_init (MetaFrames *frames)
   frames->text_heights = g_hash_table_new (NULL, NULL);
   
   frames->frames = g_hash_table_new (unsigned_long_hash, unsigned_long_equal);
-
-  frames->tooltip_timeout = 0;
-
-  frames->expose_delay_count = 0;
 
   frames->invalidate_cache_timeout_id = 0;
   frames->invalidate_frames = NULL;
@@ -645,13 +636,26 @@ LOCAL_SYMBOL MetaFrames*
 meta_frames_new (int screen_number)
 {
   GdkScreen *screen;
+  MetaFrames *frames;
 
   screen = gdk_display_get_screen (gdk_display_get_default (),
                                    screen_number);
 
-  return g_object_new (META_TYPE_FRAMES,
-                       "screen", screen,
-                       NULL);  
+  frames = g_object_new (META_TYPE_FRAMES,
+                         "screen", screen,
+                         "type", GTK_WINDOW_POPUP,
+                         NULL);
+
+  /* Put the window at an arbitrary offscreen location; the one place
+   * it can't be is at -100x-100, since the meta_window_new() will
+   * mistake it for a window created via meta_create_offscreen_window()
+   * and ignore it, and we need this window to get frame-synchronization
+   * messages so that GTK+'s style change handling works.
+   */
+  gtk_window_move (GTK_WINDOW (frames), -200, -200);
+  gtk_window_resize (GTK_WINDOW (frames), 1, 1);
+
+  return frames;
 }
 
 /* In order to use a style with a window it has to be attached to that
@@ -707,7 +711,6 @@ meta_frames_manage_window (MetaFrames *frames,
   frame->layout = NULL;
   frame->text_height = -1;
   frame->title = NULL;
-  frame->expose_delayed = FALSE;
   frame->shape_applied = FALSE;
   frame->prelit_control = META_FRAME_CONTROL_NONE;
 
@@ -762,22 +765,6 @@ meta_frames_unmanage_window (MetaFrames *frames,
     }
   else
     meta_warning ("Frame 0x%lx not managed, can't unmanage\n", xwindow);
-}
-
-static void
-meta_frames_map (GtkWidget *widget)
-{
-  /* We override the parent map function to a no-op because we don't
-   * want to actually show the GDK window. But GTK needs to think that
-   * the widget is mapped or it won't deliver the events we care about.
-   */
-  gtk_widget_set_mapped (widget, TRUE);
-}
-
-static void
-meta_frames_unmap (GtkWidget *widget)
-{
-  gtk_widget_set_mapped (widget, FALSE);
 }
 
 static MetaUIFrame*
@@ -1987,7 +1974,6 @@ meta_frames_motion_notify_event     (GtkWidget           *widget,
         /* Update prelit control and cursor */
         meta_frames_update_prelit_control (frames, frame, control);
 
-        /* No tooltip while in the process of clicking */
       }
       break;
     case META_GRAB_OP_NONE:
@@ -2291,13 +2277,6 @@ meta_frames_draw (GtkWidget *widget,
   frame = meta_frames_lookup_window (frames, cairo_xlib_surface_get_drawable (target));
   if (frame == NULL)
     return FALSE;
-
-  if (frames->expose_delay_count > 0)
-    {
-      /* Redraw this entire frame later */
-      frame->expose_delayed = TRUE;
-      return TRUE;
-    }
 
   populate_cache (frames, frame);
 
@@ -2787,50 +2766,6 @@ get_control (MetaFrames *frames,
     return META_FRAME_CONTROL_NONE;
   else
     return META_FRAME_CONTROL_TITLE;
-}
-
-LOCAL_SYMBOL void
-meta_frames_push_delay_exposes (MetaFrames *frames)
-{
-  if (frames->expose_delay_count == 0)
-    {
-      /* Make sure we've repainted things */
-      gdk_window_process_all_updates ();
-      XFlush (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()));
-    }
-  
-  frames->expose_delay_count += 1;
-}
-
-static void
-queue_pending_exposes_func (gpointer key, gpointer value, gpointer data)
-{
-  MetaUIFrame *frame;
-  MetaFrames *frames;
-
-  frames = META_FRAMES (data);
-  frame = value;
-
-  if (frame->expose_delayed)
-    {
-      invalidate_whole_window (frames, frame);
-      frame->expose_delayed = FALSE;
-    }
-}
-
-LOCAL_SYMBOL void
-meta_frames_pop_delay_exposes  (MetaFrames *frames)
-{
-  g_return_if_fail (frames->expose_delay_count > 0);
-  
-  frames->expose_delay_count -= 1;
-
-  if (frames->expose_delay_count == 0)
-    {
-      g_hash_table_foreach (frames->frames,
-                            queue_pending_exposes_func,
-                            frames);
-    }
 }
 
 static void

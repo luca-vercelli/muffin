@@ -1,7 +1,5 @@
 /* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
 
-/* Muffin X screen handler */
-
 /* 
  * Copyright (C) 2001, 2002 Havoc Pennington
  * Copyright (C) 2002, 2003 Red Hat Inc.
@@ -24,6 +22,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street - Suite 500, Boston, MA
  * 02110-1335, USA.
+ */
+
+/**
+ * SECTION:screen
+ * @title: MetaScreen
+ * @short_description: Muffin X screen handler
  */
 
 #include <config.h>
@@ -105,6 +109,12 @@ enum
   SNAP_OSD_SHOW,
   SNAP_OSD_HIDE,
   WORKSPACE_OSD_SHOW,
+  WINDOW_ADDED,
+  WINDOW_REMOVED,
+  WINDOW_MONITOR_CHANGED,
+  WINDOW_WORKSPACE_CHANGED,
+  WINDOW_SKIP_TASKBAR_CHANGED,
+  IN_FULLSCREEN_CHANGED,
 
   LAST_SIGNAL
 };
@@ -289,6 +299,62 @@ meta_screen_class_init (MetaScreenClass *klass)
   screen_signals[WORKSPACE_OSD_SHOW] =
     g_signal_new ("show-workspace-osd",
                   G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 0);
+
+  screen_signals[WINDOW_ADDED] =
+    g_signal_new ("window-added",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 2,
+                  META_TYPE_WINDOW,
+                  G_TYPE_INT);
+
+  screen_signals[WINDOW_REMOVED] =
+    g_signal_new ("window-removed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 1,
+                  META_TYPE_WINDOW);
+
+  screen_signals[WINDOW_MONITOR_CHANGED] =
+    g_signal_new ("window-monitor-changed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 2,
+                  META_TYPE_WINDOW,
+                  G_TYPE_INT);
+
+  screen_signals[WINDOW_WORKSPACE_CHANGED] =
+    g_signal_new ("window-workspace-changed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 2,
+                  META_TYPE_WINDOW,
+                  META_TYPE_WORKSPACE);
+
+  screen_signals[WINDOW_SKIP_TASKBAR_CHANGED] =
+    g_signal_new ("window-skip-taskbar-changed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 1,
+                  META_TYPE_WINDOW);
+
+  screen_signals[IN_FULLSCREEN_CHANGED] =
+    g_signal_new ("in-fullscreen-changed",
+                  G_TYPE_FROM_CLASS (object_class),
                   G_SIGNAL_RUN_LAST,
                   0,
                   NULL, NULL, NULL,
@@ -523,11 +589,13 @@ reload_monitor_infos (MetaScreen *screen)
       screen->monitor_infos[0].number = 0;
       screen->monitor_infos[0].rect = screen->rect;
       screen->monitor_infos[0].rect.width = screen->rect.width / 2;
+      screen->monitor_infos[0].in_fullscreen = -1;
 
       screen->monitor_infos[1].number = 1;
       screen->monitor_infos[1].rect = screen->rect;
       screen->monitor_infos[1].rect.x = screen->rect.width / 2;
       screen->monitor_infos[1].rect.width = screen->rect.width / 2;
+      screen->monitor_infos[1].in_fullscreen = -1;
     }
 
 #ifdef HAVE_XFREE_XINERAMA
@@ -558,6 +626,7 @@ reload_monitor_infos (MetaScreen *screen)
               screen->monitor_infos[i].rect.y = infos[i].y_org;
               screen->monitor_infos[i].rect.width = infos[i].width;
               screen->monitor_infos[i].rect.height = infos[i].height;
+              screen->monitor_infos[i].in_fullscreen = -1;
 
               meta_topic (META_DEBUG_XINERAMA,
                           "Monitor %d is %d,%d %d x %d\n",
@@ -681,6 +750,7 @@ reload_monitor_infos (MetaScreen *screen)
           
       screen->monitor_infos[0].number = 0;
       screen->monitor_infos[0].rect = screen->rect;
+      screen->monitor_infos[0].in_fullscreen = -1;
     }
 
   filter_mirrored_monitors (screen);
@@ -900,6 +970,7 @@ meta_screen_new (MetaDisplay *display,
                                                                  xroot, 
                                                                  NoEventMask);
   screen->work_area_later = 0;
+  screen->check_fullscreen_later = 0;
 
   screen->active_workspace = NULL;
   screen->workspaces = NULL;
@@ -964,9 +1035,6 @@ meta_screen_new (MetaDisplay *display,
   screen->ui = meta_ui_new (screen->display->xdisplay,
                             screen->xscreen);
 
-  screen->tab_popup = NULL;
-  screen->ws_popup = NULL;
-
   screen->tile_preview_timeout_id = 0;
   screen->tile_hud_timeout_id = 0;
 
@@ -1020,12 +1088,9 @@ meta_screen_free (MetaScreen *screen,
   
   meta_display_grab (display);
 
-  if (screen->display->compositor)
-    {
-      meta_compositor_unmanage_screen (screen->display->compositor,
-				       screen);
-    }
-  
+  meta_compositor_unmanage_screen (screen->display->compositor,
+                                   screen);
+
   meta_display_unmanage_windows_for_screen (display, screen, timestamp);
   
   meta_prefs_remove_listener (prefs_changed_callback, screen);
@@ -1070,6 +1135,9 @@ meta_screen_free (MetaScreen *screen,
     g_source_remove (screen->work_area_later);
     screen->work_area_later = 0;
   }
+
+  if (screen->check_fullscreen_later != 0)
+    g_source_remove (screen->check_fullscreen_later);
 
   if (screen->monitor_infos)
     g_free (screen->monitor_infos);
@@ -1780,264 +1848,17 @@ meta_screen_update_cursor (MetaScreen *screen)
   XFreeCursor (screen->display->xdisplay, xcursor);
 }
 
-LOCAL_SYMBOL void
-meta_screen_tab_popup_create (MetaScreen      *screen,
-                              MetaTabList      list_type,
-                              MetaTabShowType  show_type,
-                              MetaWindow      *initial_selection)
-{
-  MetaTabEntry *entries;
-  GList *tab_list;
-  GList *tmp;
-  int len;
-  int i;
-
-  if (screen->tab_popup)
-    return;
-
-  tab_list = meta_display_get_tab_list (screen->display,
-                                        list_type,
-                                        screen,
-                                        screen->active_workspace);
-
-  len = g_list_length (tab_list);
-
-  entries = g_new (MetaTabEntry, len + 1);
-  entries[len].key = NULL;
-  entries[len].title = NULL;
-  entries[len].icon = NULL;
-
-  i = 0;
-  tmp = tab_list;
-  while (i < len)
-    {
-      MetaWindow *window;
-      MetaRectangle r;
-
-      window = tmp->data;
-
-      entries[i].key = (MetaTabEntryKey) window;
-      entries[i].title = window->title;
-      entries[i].icon = g_object_ref (window->icon);
-      entries[i].blank = FALSE;
-      entries[i].hidden = !meta_window_showing_on_its_workspace (window);
-      entries[i].demands_attention = window->wm_state_demands_attention;
-
-      if (show_type == META_TAB_SHOW_INSTANTLY ||
-          !entries[i].hidden                   ||
-          !meta_window_get_icon_geometry (window, &r))
-        meta_window_get_outer_rect (window, &r);
-
-      entries[i].rect = r;
-
-      /* Find inside of highlight rectangle to be used when window is
-       * outlined for tabbing.  This should be the size of the
-       * east/west frame, and the size of the south frame, on those
-       * sides.  On the top it should be the size of the south frame
-       * edge.
-       */
-#define OUTLINE_WIDTH 5
-      /* Top side */
-      if (!entries[i].hidden &&
-          window->frame && window->frame->bottom_height > 0 &&
-          window->frame->child_y >= window->frame->bottom_height)
-        entries[i].inner_rect.y = window->frame->bottom_height;
-      else
-        entries[i].inner_rect.y = OUTLINE_WIDTH;
-
-      /* Bottom side */
-      if (!entries[i].hidden &&
-          window->frame && window->frame->bottom_height != 0)
-        entries[i].inner_rect.height = r.height
-          - entries[i].inner_rect.y - window->frame->bottom_height;
-      else
-        entries[i].inner_rect.height = r.height
-          - entries[i].inner_rect.y - OUTLINE_WIDTH;
-
-      /* Left side */
-      if (!entries[i].hidden && window->frame && window->frame->child_x != 0)
-        entries[i].inner_rect.x = window->frame->child_x;
-      else
-        entries[i].inner_rect.x = OUTLINE_WIDTH;
-
-      /* Right side */
-      if (!entries[i].hidden &&
-          window->frame && window->frame->right_width != 0)
-        entries[i].inner_rect.width = r.width
-          - entries[i].inner_rect.x - window->frame->right_width;
-      else
-        entries[i].inner_rect.width = r.width
-          - entries[i].inner_rect.x - OUTLINE_WIDTH;
-
-      ++i;
-      tmp = tmp->next;
-    }
-
-  if (!meta_prefs_get_no_tab_popup ())
-    screen->tab_popup = meta_ui_tab_popup_new (entries,
-                                               screen->number,
-                                               len,
-                                               5, /* FIXME */
-                                               TRUE);
-
-  for (i = 0; i < len; i++)
-    g_object_unref (entries[i].icon);
-
-  g_free (entries);
-
-  g_list_free (tab_list);
-
-  meta_ui_tab_popup_select (screen->tab_popup,
-                            (MetaTabEntryKey) initial_selection);
-
-  if (show_type != META_TAB_SHOW_INSTANTLY)
-    meta_ui_tab_popup_set_showing (screen->tab_popup, TRUE);
-}
-
-LOCAL_SYMBOL void
-meta_screen_tab_popup_forward (MetaScreen *screen)
-{
-  g_return_if_fail (screen->tab_popup != NULL);
-
-  meta_ui_tab_popup_forward (screen->tab_popup);
-}
-
-LOCAL_SYMBOL void
-meta_screen_tab_popup_backward (MetaScreen *screen)
-{
-  g_return_if_fail (screen->tab_popup != NULL);
-
-  meta_ui_tab_popup_backward (screen->tab_popup);
-}
-
-LOCAL_SYMBOL MetaWindow *
-meta_screen_tab_popup_get_selected (MetaScreen *screen)
-{
-  g_return_val_if_fail (screen->tab_popup != NULL, NULL);
-
-  return (MetaWindow *) meta_ui_tab_popup_get_selected (screen->tab_popup);
-}
-
-LOCAL_SYMBOL void
-meta_screen_tab_popup_destroy (MetaScreen *screen)
-{
-  if (screen->tab_popup)
-    {
-      meta_ui_tab_popup_free (screen->tab_popup);
-      screen->tab_popup = NULL;
-    }
-}
-
-LOCAL_SYMBOL void
-meta_screen_workspace_popup_create (MetaScreen    *screen,
-                                    MetaWorkspace *initial_selection)
-{
-  MetaTabEntry *entries;
-  int len;
-  int i;
-  MetaWorkspaceLayout layout;
-  int n_workspaces;
-  int current_workspace;
-
-  if (screen->ws_popup || meta_prefs_get_no_tab_popup ())
-    return;
-
-  current_workspace = meta_workspace_index (screen->active_workspace);
-  n_workspaces = meta_screen_get_n_workspaces (screen);
-
-  meta_screen_calc_workspace_layout (screen, n_workspaces,
-                                     current_workspace, &layout);
-
-  len = layout.grid_area;
-  
-  entries = g_new (MetaTabEntry, len + 1);
-  entries[len].key = NULL;
-  entries[len].title = NULL;
-  entries[len].icon = NULL;
-
-  i = 0;
-  while (i < len)
-    {
-      if (layout.grid[i] >= 0)
-        {
-          MetaWorkspace *workspace;
-          
-          workspace = meta_screen_get_workspace_by_index (screen,
-                                                          layout.grid[i]);
-          
-          entries[i].key = (MetaTabEntryKey) workspace;
-          entries[i].title = meta_workspace_get_name (workspace);
-          entries[i].icon = NULL;
-          entries[i].blank = FALSE;
-          
-          g_assert (entries[i].title != NULL);
-        }
-      else
-        {
-          entries[i].key = NULL;
-          entries[i].title = NULL;
-          entries[i].icon = NULL;
-          entries[i].blank = TRUE;
-        }
-      entries[i].hidden = FALSE;
-      entries[i].demands_attention = FALSE;
-
-      ++i;
-    }
-
-  screen->ws_popup = meta_ui_tab_popup_new (entries,
-                                            screen->number,
-                                            len,
-                                            layout.cols,
-                                            FALSE);
-
-  g_free (entries);
-  meta_screen_free_workspace_layout (&layout);
-
-  meta_ui_tab_popup_select (screen->ws_popup,
-                            (MetaTabEntryKey) initial_selection);
-  meta_ui_tab_popup_set_showing (screen->ws_popup, TRUE);
-}
-
-LOCAL_SYMBOL void
-meta_screen_workspace_popup_select (MetaScreen    *screen,
-                                    MetaWorkspace *workspace)
-{
-  g_return_if_fail (screen->ws_popup != NULL);
-
-  meta_ui_tab_popup_select (screen->ws_popup,
-                            (MetaTabEntryKey) workspace);
-}
-
-LOCAL_SYMBOL MetaWorkspace *
-meta_screen_workspace_popup_get_selected (MetaScreen *screen)
-{
-  g_return_val_if_fail (screen->ws_popup != NULL, NULL);
-
-  return (MetaWorkspace *) meta_ui_tab_popup_get_selected (screen->ws_popup);
-}
-
-LOCAL_SYMBOL void
-meta_screen_workspace_popup_destroy (MetaScreen *screen)
-{
-  if (screen->ws_popup)
-    {
-      meta_ui_tab_popup_free (screen->ws_popup);
-      screen->ws_popup = NULL;
-    }
-}
-
 static gboolean
 snap_osd_timeout (void *data)
 {
   MetaScreen *screen = data;
-  const MetaMonitorInfo *monitor;
+  int monitor;
 
   monitor = meta_screen_get_current_monitor (screen);
   
   if (meta_screen_tile_preview_get_visible (screen) ||
       meta_screen_tile_hud_get_visible (screen))
-      g_signal_emit (screen, screen_signals[SNAP_OSD_SHOW], 0, monitor->number);
+      g_signal_emit (screen, screen_signals[SNAP_OSD_SHOW], 0, monitor);
   screen->snap_osd_timeout_id = 0;
   return FALSE;
 }
@@ -2186,9 +2007,9 @@ meta_screen_tile_hud_update_timeout (gpointer data)
         /* This bit is liable to get more complicated when there are multiple
            monitors involved - we'll have partial hud, with a bare area at the
            monitor 'joint' or something... */
-        const MetaMonitorInfo *monitor;
+        int monitor;
         monitor = meta_screen_get_current_monitor (screen);
-        meta_window_get_work_area_for_monitor (window, monitor->number, &work_area);
+        meta_window_get_work_area_for_monitor (window, monitor, &work_area);
         meta_compositor_show_hud_preview (screen->display->compositor,
                                           screen, window->current_proximity_zone,
                                           &work_area, window->snap_queued);
@@ -2347,27 +2168,39 @@ meta_screen_get_monitor_for_rect (MetaScreen    *screen,
                                   MetaRectangle *rect)
 {
   int i;
-  int best_monitor, monitor_score;
+  int best_monitor, monitor_score, rect_area;
 
   if (screen->n_monitor_infos == 1)
     return &screen->monitor_infos[0];
 
   best_monitor = 0;
-  monitor_score = 0;
+  monitor_score = -1;
 
+  rect_area = meta_rectangle_area (rect);
   for (i = 0; i < screen->n_monitor_infos; i++)
     {
-      MetaRectangle dest;
-      if (meta_rectangle_intersect (&screen->monitor_infos[i].rect,
-                                    rect,
-                                    &dest))
+      gboolean result;
+      int cur;
+
+      if (rect_area > 0)
         {
-          int cur = meta_rectangle_area (&dest);
-          if (cur > monitor_score)
-            {
-              monitor_score = cur;
-              best_monitor = i;
-            }
+          MetaRectangle dest;
+          result = meta_rectangle_intersect (&screen->monitor_infos[i].rect,
+                                             rect,
+                                             &dest);
+          cur = meta_rectangle_area (&dest);
+        }
+      else
+        {
+          result = meta_rectangle_contains_rect (&screen->monitor_infos[i].rect,
+                                                 rect);
+          cur = rect_area;
+        }
+
+      if (result && cur > monitor_score)
+        {
+          monitor_score = cur;
+          best_monitor = i;
         }
     }
 
@@ -2383,6 +2216,14 @@ meta_screen_get_monitor_for_window (MetaScreen *screen,
   meta_window_get_outer_rect (window, &window_rect);
 
   return meta_screen_get_monitor_for_rect (screen, &window_rect);
+}
+
+int
+meta_screen_get_monitor_index_for_rect (MetaScreen    *screen,
+                                        MetaRectangle *rect)
+{
+  const MetaMonitorInfo *monitor = meta_screen_get_monitor_for_rect (screen, rect);
+  return monitor->number;
 }
 
 LOCAL_SYMBOL const MetaMonitorInfo* 
@@ -2447,7 +2288,7 @@ meta_screen_get_natural_monitor_list (MetaScreen *screen,
       visited[i] = FALSE;
     }
 
-  current = meta_screen_get_current_monitor (screen);
+  current = meta_screen_get_current_monitor_info (screen);
   monitor_queue = g_queue_new ();
   g_queue_push_tail (monitor_queue, (gpointer) current);
   visited[current->number] = TRUE;
@@ -2513,11 +2354,27 @@ meta_screen_get_natural_monitor_list (MetaScreen *screen,
   g_queue_free (monitor_queue);
 }
 
-LOCAL_SYMBOL const MetaMonitorInfo*
+const MetaMonitorInfo *
+meta_screen_get_current_monitor_info (MetaScreen *screen)
+{
+    int monitor_index;
+    monitor_index = meta_screen_get_current_monitor (screen);
+    return &screen->monitor_infos[monitor_index];
+}
+
+/**
+ * meta_screen_get_current_monitor:
+ * @screen: a #MetaScreen
+ *
+ * Gets the index of the monitor that currently has the mouse pointer.
+ *
+ * Return value: a monitor index
+ */
+int
 meta_screen_get_current_monitor (MetaScreen *screen)
 {
   if (screen->n_monitor_infos == 1)
-    return &screen->monitor_infos[0];
+    return 0;
   
   /* Sadly, we have to do it this way. Yuck.
    */
@@ -2559,7 +2416,7 @@ meta_screen_get_current_monitor (MetaScreen *screen)
                   screen->last_monitor_index);
     }
 
-  return &screen->monitor_infos[screen->last_monitor_index];
+  return screen->last_monitor_index;
 }
 
 /**
@@ -3239,9 +3096,8 @@ meta_screen_resize (MetaScreen *screen,
   reload_monitor_infos (screen);
   set_desktop_geometry_hint (screen);
 
-  if (screen->display->compositor)
-    meta_compositor_sync_screen_size (screen->display->compositor,
-				      screen, width, height);
+  meta_compositor_sync_screen_size (screen->display->compositor,
+                                    screen, width, height);
 
   /* Queue a resize on all the windows */
   meta_screen_foreach_window (screen, meta_screen_resize_func, 0);
@@ -3259,6 +3115,8 @@ meta_screen_resize (MetaScreen *screen,
 
   g_free (old_monitor_infos);
   g_slist_free (windows);
+
+  meta_screen_queue_check_fullscreen (screen);
 
   g_signal_emit (screen, screen_signals[MONITORS_CHANGED], 0);
 }
@@ -3333,26 +3191,15 @@ meta_screen_toggle_desktop (MetaScreen *screen,
 {
   if (screen->active_workspace->showing_desktop)
     {
-      /*
-       * dirty hack because the actual window to be focused after unshowing the desktop
-       * lost its focus when showing desktop
-       * and therefore is second in the MRU list
-       */
-      MetaWindow *not_this_one;
-      not_this_one = meta_stack_get_default_focus_window(screen->stack, 
-                                                         screen->active_workspace,
-                                                         NULL);
       meta_screen_unshow_desktop (screen);
-      meta_workspace_focus_default_window (screen->active_workspace,
-                                           not_this_one,
-                                           timestamp);
-      // If there's only one window, make sure it gets the focus
       meta_workspace_focus_default_window (screen->active_workspace,
                                            NULL,
                                            timestamp);
     }
   else
-    meta_screen_show_desktop (screen, timestamp);
+    {
+      meta_screen_show_desktop (screen, timestamp);
+    }
 }
 
 void
@@ -3935,4 +3782,128 @@ meta_screen_update_snapped_windows (MetaScreen *screen)
           meta_workspace_update_snapped_windows (work);
           tmp = tmp->next;
         }
+}
+
+static gboolean
+check_fullscreen_func (gpointer data)
+{
+  MetaScreen *screen = data;
+  MetaWindow *window;
+  GSList *fullscreen_monitors = NULL;
+  GSList *obscured_monitors = NULL;
+  gboolean in_fullscreen_changed = FALSE;
+  int i;
+
+  screen->check_fullscreen_later = 0;
+
+  /* We consider a monitor in fullscreen if it contains a fullscreen window;
+   * however we make an exception for maximized windows above the fullscreen
+   * one, as in that case window+chrome fully obscure the fullscreen window.
+   */
+  for (window = meta_stack_get_top (screen->stack);
+       window;
+       window = meta_stack_get_below (screen->stack, window, FALSE))
+    {
+      gboolean covers_monitors = FALSE;
+
+      if (window->screen != screen || window->hidden)
+        continue;
+
+      if (window->fullscreen)
+        {
+          covers_monitors = TRUE;
+        }
+      else if (window->override_redirect)
+        {
+          /* We want to handle the case where an application is creating an
+           * override-redirect window the size of the screen (monitor) and treat
+           * it similarly to a fullscreen window, though it doesn't have fullscreen
+           * window management behavior. (Being O-R, it's not managed at all.)
+           */
+          if (meta_window_is_monitor_sized (window))
+            covers_monitors = TRUE;
+        }
+      else if (window->maximized_horizontally &&
+               window->maximized_vertically)
+        {
+          int monitor_index = meta_window_get_monitor (window);
+          /* + 1 to avoid NULL */
+          gpointer monitor_p = GINT_TO_POINTER(monitor_index + 1);
+          if (!g_slist_find (obscured_monitors, monitor_p))
+            obscured_monitors = g_slist_prepend (obscured_monitors, monitor_p);
+        }
+
+      if (covers_monitors)
+        {
+          int *monitors;
+          gsize n_monitors;
+          gsize j;
+
+          monitors = meta_window_get_all_monitors (window, &n_monitors);
+          for (j = 0; j < n_monitors; j++)
+            {
+              /* + 1 to avoid NULL */
+              gpointer monitor_p = GINT_TO_POINTER(monitors[j] + 1);
+              if (!g_slist_find (fullscreen_monitors, monitor_p) &&
+                  !g_slist_find (obscured_monitors, monitor_p))
+                fullscreen_monitors = g_slist_prepend (fullscreen_monitors, monitor_p);
+            }
+
+          g_free (monitors);
+        }
+    }
+
+  g_slist_free (obscured_monitors);
+
+  for (i = 0; i < screen->n_monitor_infos; i++)
+    {
+      MetaMonitorInfo *info = &screen->monitor_infos[i];
+      gboolean in_fullscreen = g_slist_find (fullscreen_monitors, GINT_TO_POINTER (i + 1)) != NULL;
+      if (in_fullscreen != info->in_fullscreen)
+        {
+          info->in_fullscreen = in_fullscreen;
+          in_fullscreen_changed = TRUE;
+        }
+    }
+
+  g_slist_free (fullscreen_monitors);
+
+  if (in_fullscreen_changed)
+    g_signal_emit (screen, screen_signals[IN_FULLSCREEN_CHANGED], 0, NULL);
+
+  return FALSE;
+}
+
+void
+meta_screen_queue_check_fullscreen (MetaScreen *screen)
+{
+  if (!screen->check_fullscreen_later)
+    screen->check_fullscreen_later = meta_later_add (META_LATER_CHECK_FULLSCREEN,
+                                                     check_fullscreen_func,
+                                                     screen, NULL);
+}
+
+/**
+ * meta_screen_get_monitor_in_fullscreen:
+ * @screen: a #MetaScreen
+ * @monitor: the monitor number
+ *
+ * Determines whether there is a fullscreen window obscuring the specified
+ * monitor. If there is a fullscreen window, the desktop environment will
+ * typically hide any controls that might obscure the fullscreen window.
+ *
+ * You can get notification when this changes by connecting to
+ * MetaScreen::in-fullscreen-changed.
+ *
+ * Returns: %TRUE if there is a fullscreen window covering the specified monitor.
+ */
+gboolean
+meta_screen_get_monitor_in_fullscreen (MetaScreen  *screen,
+                                       int          monitor)
+{
+  g_return_val_if_fail (META_IS_SCREEN (screen), FALSE);
+  g_return_val_if_fail (monitor >= 0 && monitor < screen->n_monitor_infos, FALSE);
+
+  /* We use -1 as a flag to mean "not known yet" for notification purposes */
+  return screen->monitor_infos[monitor].in_fullscreen == TRUE;
 }

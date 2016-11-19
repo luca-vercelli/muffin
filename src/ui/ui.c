@@ -288,9 +288,12 @@ meta_ui_new (Display *xdisplay,
   g_assert (gdisplay == gdk_display_get_default ());
 
   ui->frames = meta_frames_new (XScreenNumberOfScreen (screen));
-  /* This does not actually show any widget. MetaFrames has been hacked so
-   * that showing it doesn't actually do anything. But we need the flags
-   * set for GTK to deliver events properly. */
+  /* GTK+ needs the frame-sync protocol to work in order to properly
+   * handle style changes. This means that the dummy widget we create
+   * to get the style for title bars actually needs to be mapped
+   * and fully tracked as a MetaWindow. Horrible, but mostly harmless -
+   * the window is a 1x1 overide redirect window positioned offscreen.
+   */
   gtk_widget_show (GTK_WIDGET (ui->frames));
 
   g_object_set_data (G_OBJECT (gdisplay), "meta-ui", ui);
@@ -591,18 +594,6 @@ meta_gdk_pixbuf_get_from_pixmap (Pixmap       xpixmap,
   return retval;
 }
 
-LOCAL_SYMBOL void
-meta_ui_push_delay_exposes (MetaUI *ui)
-{
-  meta_frames_push_delay_exposes (ui->frames);
-}
-
-LOCAL_SYMBOL void
-meta_ui_pop_delay_exposes  (MetaUI *ui)
-{
-  meta_frames_pop_delay_exposes (ui->frames);
-}
-
 LOCAL_SYMBOL GdkPixbuf*
 meta_ui_get_default_window_icon (MetaUI *ui)
 {
@@ -734,6 +725,7 @@ meta_ui_theme_get_frame_borders (MetaUI *ui,
   GtkStyleContext *style = NULL;
   PangoContext *context;
   const PangoFontDescription *font_desc;
+  PangoFontDescription *free_font_desc = NULL;
 
   if (meta_ui_have_a_theme ())
     {
@@ -743,7 +735,10 @@ meta_ui_theme_get_frame_borders (MetaUI *ui,
       if (!font_desc)
         {
           style = gtk_style_context_new ();
-          font_desc = gtk_style_context_get_font (style, 0);
+          gtk_style_context_get (style, GTK_STATE_FLAG_NORMAL,
+                                 GTK_STYLE_PROPERTY_FONT, &free_font_desc,
+                                 NULL);
+          font_desc = (const PangoFontDescription *) free_font_desc;
         }
 
       text_height = meta_pango_font_desc_get_text_height (font_desc, context);
@@ -751,6 +746,9 @@ meta_ui_theme_get_frame_borders (MetaUI *ui,
       meta_theme_get_frame_borders (meta_theme_get_current (),
                                     type, text_height, flags,
                                     borders);
+
+      if (free_font_desc)
+        pango_font_description_free (free_font_desc);
     }
   else
     {

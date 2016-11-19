@@ -166,6 +166,7 @@ struct _MetaDisplay
 
   /* Alt+click button grabs */
   unsigned int window_grab_modifiers;
+  unsigned int mouse_zoom_modifiers;
   
   /* current window operation */
   MetaGrabOp  grab_op;
@@ -206,10 +207,6 @@ struct _MetaDisplay
   int         xkb_base_event_type;
   guint32     last_bell_time;
 #endif
-#ifdef HAVE_XSYNC
-  /* alarm monitoring client's _NET_WM_SYNC_REQUEST_COUNTER */
-  XSyncAlarm  grab_sync_request_alarm;
-#endif
   int	      grab_resize_timeout_id;
 
   /* Keybindings stuff */
@@ -227,6 +224,8 @@ struct _MetaDisplay
   unsigned int hyper_mask;
   unsigned int super_mask;
   unsigned int meta_mask;
+
+  guint        rebuild_keybinding_idle_id;
   
   /* Monitor cache */
   unsigned int monitor_cache_invalidated : 1;
@@ -254,6 +253,8 @@ struct _MetaDisplay
 
   /* Managed by compositor.c */
   MetaCompositor *compositor;
+
+  unsigned int mouse_zoom_enabled : 1;
 
   int render_event_base;
   int render_error_base;
@@ -349,6 +350,16 @@ void        meta_display_register_x_window   (MetaDisplay *display,
 void        meta_display_unregister_x_window (MetaDisplay *display,
                                               Window       xwindow);
 
+#ifdef HAVE_XSYNC
+MetaWindow* meta_display_lookup_sync_alarm     (MetaDisplay *display,
+                                                XSyncAlarm   alarm);
+void        meta_display_register_sync_alarm   (MetaDisplay *display,
+                                                XSyncAlarm  *alarmp,
+                                                MetaWindow  *window);
+void        meta_display_unregister_sync_alarm (MetaDisplay *display,
+                                                XSyncAlarm   alarm);
+#endif /* HAVE_XSYNC */
+
 void        meta_display_notify_window_created (MetaDisplay  *display,
                                                 MetaWindow   *window);
 
@@ -406,6 +417,7 @@ gboolean meta_display_window_has_pending_pings (MetaDisplay        *display,
 						MetaWindow         *window);
 
 int meta_resize_gravity_from_grab_op (MetaGrabOp op);
+int meta_resize_gravity_from_tile_mode (MetaTileMode mode);
 
 gboolean meta_grab_op_is_moving   (MetaGrabOp op);
 gboolean meta_grab_op_is_resizing (MetaGrabOp op);

@@ -25,7 +25,6 @@
 
 #include <config.h>
 #include "frame.h"
-#include "bell.h"
 #include <meta/errors.h>
 #include "keybindings-private.h"
 
@@ -66,7 +65,6 @@ meta_window_ensure_frame (MetaWindow *window)
   frame->right_width = 0;
   frame->current_cursor = 0;
 
-  frame->mapped = FALSE;
   frame->is_flashing = FALSE;
   
   meta_verbose ("Framing window %s: visual %s default, depth %d default depth %d\n",
@@ -166,6 +164,8 @@ meta_window_ensure_frame (MetaWindow *window)
   /* Move keybindings to frame instead of window */
   meta_window_grab_keys (window);
 
+  meta_ui_map_frame (frame->window->screen->ui, frame->xwindow);
+
   meta_display_ungrab (window->display);
 }
 
@@ -183,9 +183,7 @@ meta_window_destroy_frame (MetaWindow *window)
   frame = window->frame;
 
   meta_frame_calc_borders (frame, &borders);
-  
-  meta_bell_notify_frame_destroy (frame);
-  
+
   /* Unparent the client window; it may be destroyed,
    * thus the error trap.
    */

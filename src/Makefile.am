@@ -6,6 +6,9 @@ lib_LTLIBRARIES = libmuffin.la
 SUBDIRS=wm-tester tools compositor/plugins
 
 AM_CPPFLAGS=								\
+	-DCLUTTER_ENABLE_EXPERIMENTAL_API \
+	-DCOGL_ENABLE_EXPERIMENTAL_API \
+	$(WARN_CFLAGS)							\
 	$(MUFFIN_CFLAGS)						\
 	-I$(srcdir)							\
 	-I$(srcdir)/core						\
@@ -42,6 +45,8 @@ libmuffin_la_SOURCES =				\
 	compositor/cogl-utils.h			\
 	compositor/compositor.c			\
 	compositor/compositor-private.h		\
+	compositor/meta-background.c 		\
+	compositor/meta-background.h 		\
 	compositor/meta-background-actor.c	\
 	compositor/meta-background-actor-private.h	\
 	compositor/meta-module.c		\
@@ -52,6 +57,8 @@ libmuffin_la_SOURCES =				\
 	compositor/meta-shadow-factory.c	\
 	compositor/meta-shadow-factory-private.h	\
 	compositor/meta-shaped-texture.c	\
+    compositor/meta-sync-ring.c \
+    compositor/meta-sync-ring.h \
 	compositor/meta-texture-rectangle.c	\
 	compositor/meta-texture-rectangle.h	\
 	compositor/meta-texture-tower.c		\
@@ -138,8 +145,6 @@ libmuffin_la_SOURCES =				\
 	ui/metaaccellabel.h			\
 	ui/resizepopup.c			\
 	ui/resizepopup.h			\
-	ui/tabpopup.c				\
-	ui/tabpopup.h				\
 	ui/theme-parser.c			\
 	ui/theme.c				\
 	meta/theme.h				\
@@ -149,7 +154,7 @@ libmuffin_la_SOURCES =				\
 	ui/preview-widget.c			\
 	$(muffin_built_sources)
 
-libmuffin_la_LDFLAGS = -no-undefined
+libmuffin_la_LDFLAGS = $(WARN_LDFLAGS) -no-undefined
 libmuffin_la_LIBADD  = $(MUFFIN_LIBS) -lclutter-glx-1.0
 
 # Headers installed for plugins; introspected information will
@@ -231,7 +236,7 @@ Meta-$(api_version).gir: libmuffin.la
 	muffin-enum-types.h			\
 	$(libmuffininclude_base_headers)	\
 	$(filter %.c,$(libmuffin_la_SOURCES))
-@META_GIR@_SCANNERFLAGS = --warn-all --warn-error
+@META_GIR@_SCANNERFLAGS = $(WARN_SCANNERFLAGS) --warn-all --warn-error
 
 endif
 
@@ -243,8 +248,8 @@ testasyncgetprop_SOURCES = core/testasyncgetprop.c core/async-getprop.c
 
 # NO-OP: work around the fact that source code tested by the programs are
 # compiled for library
-testasyncgetprop_CFLAGS = $(AM_CFLAGS) 
-testboxes_CFLAGS = $(AM_CFLAGS) 
+testasyncgetprop_CFLAGS = $(WARN_CFLAGS) $(AM_CFLAGS)
+testboxes_CFLAGS = $(WARN_CFLAGS) $(AM_CFLAGS)
 
 noinst_PROGRAMS=testboxes testgradient testasyncgetprop
 
@@ -266,8 +271,8 @@ gsettings_SCHEMAS = org.cinnamon.muffin.gschema.xml
 
 IMAGES=stock_maximize.png stock_minimize.png stock_delete.png
 VARIABLES=stock_maximize_data $(srcdir)/stock_maximize.png \
-          stock_minimize_data $(srcdir)/stock_minimize.png \
-          stock_delete_data $(srcdir)/stock_delete.png
+		  stock_minimize_data $(srcdir)/stock_minimize.png \
+		  stock_delete_data $(srcdir)/stock_delete.png
 
 BUILT_SOURCES = inlinepixbufs.h
 CLEANFILES =					\
@@ -305,7 +310,7 @@ muffin-enum-types.h: stamp-muffin-enum-types.h Makefile
 stamp-muffin-enum-types.h: $(libmuffininclude_base_headers) muffin-enum-types.h.in
 	$(AM_V_GEN) ( cd $(srcdir) && \
 	  $(GLIB_MKENUMS) \
-	    --template muffin-enum-types.h.in \
+		--template muffin-enum-types.h.in \
 	  $(libmuffininclude_base_headers) ) >> xgen-teth && \
 	(cmp -s xgen-teth muffin-enum-types.h || cp xgen-teth muffin-enum-types.h) && \
 	rm -f xgen-teth && \
@@ -314,7 +319,7 @@ stamp-muffin-enum-types.h: $(libmuffininclude_base_headers) muffin-enum-types.h.
 muffin-enum-types.c: stamp-muffin-enum-types.h muffin-enum-types.c.in
 	  $(AM_V_GEN) ( cd $(srcdir) && \
 	  $(GLIB_MKENUMS) \
-	    --template muffin-enum-types.c.in \
+		--template muffin-enum-types.c.in \
 	  $(libmuffininclude_base_headers) ) >> xgen-tetc && \
 	cp xgen-tetc muffin-enum-types.c && \
 	rm -f xgen-tetc

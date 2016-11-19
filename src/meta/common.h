@@ -33,6 +33,12 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+/**
+ * SECTION:common
+ * @title: Common
+ * @short_description: Muffin common types
+ */
+
 typedef struct _MetaResizePopup MetaResizePopup;
 
 typedef enum
@@ -56,10 +62,8 @@ typedef enum
   META_FRAME_ABOVE                    = 1 << 16,
   META_FRAME_TILED_LEFT               = 1 << 17,
   META_FRAME_TILED_RIGHT              = 1 << 18,
-  META_FRAME_ALLOWS_VERTICAL_RESIZE   = (META_FRAME_ALLOWS_TOP_RESIZE |
-                                         META_FRAME_ALLOWS_BOTTOM_RESIZE),
-  META_FRAME_ALLOWS_HORIZONTAL_RESIZE = (META_FRAME_ALLOWS_LEFT_RESIZE |
-                                         META_FRAME_ALLOWS_RIGHT_RESIZE)
+  META_FRAME_ALLOWS_VERTICAL_RESIZE   = (META_FRAME_ALLOWS_TOP_RESIZE | META_FRAME_ALLOWS_BOTTOM_RESIZE),
+  META_FRAME_ALLOWS_HORIZONTAL_RESIZE = (META_FRAME_ALLOWS_LEFT_RESIZE | META_FRAME_ALLOWS_RIGHT_RESIZE)
 } MetaFrameFlags;
 
 typedef enum
@@ -292,6 +296,13 @@ typedef enum {
     META_WINDOW_TILE_TYPE_TILED,
     META_WINDOW_TILE_TYPE_SNAPPED
 } MetaWindowTileType;
+
+typedef enum {
+    META_BELL_TYPE_NONE,
+    META_BELL_TYPE_STICKY_KEYS,
+    META_BELL_TYPE_SLOW_KEYS,
+    META_BELL_TYPE_BOUNCE_KEYS
+} MetaBellType;
 
 #define MAX_BUTTONS_PER_CORNER META_BUTTON_FUNCTION_LAST
 

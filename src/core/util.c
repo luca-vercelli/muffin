@@ -22,6 +22,12 @@
  * 02110-1335, USA.
  */
 
+/**
+ * SECTION:util
+ * @title: Utility functions
+ * @short_description: Miscellaneous utility functions
+ */
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -891,6 +897,9 @@ meta_later_add (MetaLaterType  when,
       later->source = g_idle_add_full (META_PRIORITY_RESIZE, call_idle_later, later, NULL);
       ensure_later_repaint_func ();
       break;
+    case META_LATER_CALC_SHOWING:
+    case META_LATER_CHECK_FULLSCREEN:
+    case META_LATER_SYNC_STACK:
     case META_LATER_BEFORE_REDRAW:
       ensure_later_repaint_func ();
       break;

@@ -46,6 +46,7 @@ struct _MetaMonitorInfo
   int number;
   MetaRectangle rect;
   gboolean is_primary;
+  gboolean in_fullscreen;
   XID output; /* The primary or first output for this crtc, None if no xrandr */
 };
 
@@ -75,7 +76,6 @@ struct _MetaScreen
   Visual *default_xvisual;
   MetaRectangle rect;  /* Size of screen; rect.x & rect.y are always 0 */
   MetaUI *ui;
-  MetaTabPopup *tab_popup, *ws_popup;
 
   guint tile_preview_timeout_id;
   guint tile_hud_timeout_id;
@@ -120,6 +120,7 @@ struct _MetaScreen
   guint32 wm_cm_timestamp;
 
   guint work_area_later;
+  guint check_fullscreen_later;
 
   int rows_of_workspaces;
   int columns_of_workspaces;
@@ -166,22 +167,6 @@ void          meta_screen_set_cursor          (MetaScreen                 *scree
                                                MetaCursor                  cursor);
 void          meta_screen_update_cursor       (MetaScreen                 *screen);
 
-void          meta_screen_tab_popup_create       (MetaScreen              *screen,
-                                                  MetaTabList              list_type,
-                                                  MetaTabShowType          show_type,
-                                                  MetaWindow              *initial_window);
-void          meta_screen_tab_popup_forward      (MetaScreen              *screen);
-void          meta_screen_tab_popup_backward     (MetaScreen              *screen);
-MetaWindow*   meta_screen_tab_popup_get_selected (MetaScreen              *screen);
-void          meta_screen_tab_popup_destroy      (MetaScreen              *screen);
-
-void          meta_screen_workspace_popup_create       (MetaScreen    *screen,
-                                                        MetaWorkspace *initial_selection);
-void          meta_screen_workspace_popup_select       (MetaScreen    *screen,
-                                                        MetaWorkspace *workspace);
-MetaWorkspace*meta_screen_workspace_popup_get_selected (MetaScreen    *screen);
-void          meta_screen_workspace_popup_destroy      (MetaScreen    *screen);
-
 void          meta_screen_tile_preview_update          (MetaScreen    *screen,
                                                         gboolean       delay);
 void          meta_screen_tile_preview_hide            (MetaScreen    *screen);
@@ -197,11 +182,11 @@ gboolean      meta_screen_tile_hud_get_visible (MetaScreen *screen);
 
 void          meta_screen_hide_hud_and_preview (MetaScreen *screen);
 
-const MetaMonitorInfo* meta_screen_get_current_monitor    (MetaScreen    *screen);
-const MetaMonitorInfo* meta_screen_get_monitor_for_rect   (MetaScreen    *screen,
-                                                           MetaRectangle *rect);
-const MetaMonitorInfo* meta_screen_get_monitor_for_window (MetaScreen    *screen,
-                                                           MetaWindow    *window);
+const MetaMonitorInfo* meta_screen_get_current_monitor_info (MetaScreen    *screen);
+const MetaMonitorInfo* meta_screen_get_monitor_for_rect     (MetaScreen    *screen,
+                                                             MetaRectangle *rect);
+const MetaMonitorInfo* meta_screen_get_monitor_for_window   (MetaScreen    *screen,
+                                                             MetaWindow    *window);
 
 
 const MetaMonitorInfo* meta_screen_get_monitor_neighbor (MetaScreen *screen,
@@ -214,6 +199,7 @@ void          meta_screen_get_natural_monitor_list (MetaScreen *screen,
 void          meta_screen_update_workspace_layout (MetaScreen             *screen);
 void          meta_screen_update_workspace_names  (MetaScreen             *screen);
 void          meta_screen_queue_workarea_recalc   (MetaScreen             *screen);
+void          meta_screen_queue_check_fullscreen  (MetaScreen             *screen);
 
 Window meta_create_offscreen_window (Display *xdisplay,
                                      Window   parent,

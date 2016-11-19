@@ -25,7 +25,8 @@
  */
 
 /**
- * SECTION:MetaDisplay
+ * SECTION:display
+ * @title: MetaDisplay
  * @short_description: Handles operations on an X display.
  *
  * The display is represented as a MetaDisplay struct.
@@ -141,6 +142,7 @@ enum
   GRAB_OP_END,
   ZOOM_SCROLL_IN,
   ZOOM_SCROLL_OUT,
+  BELL,
   LAST_SIGNAL
 };
 
@@ -181,6 +183,7 @@ static void    process_selection_clear   (MetaDisplay   *display,
                                           XEvent        *event);
 
 static void    update_window_grab_modifiers (MetaDisplay *display);
+static void    update_mouse_zoom_modifiers (MetaDisplay *display);
 
 static void    prefs_changed_callback    (MetaPreference pref,
                                           void          *data);
@@ -293,6 +296,14 @@ meta_display_class_init (MetaDisplayClass *klass)
                   0,
                   NULL, NULL, NULL,
                   G_TYPE_NONE, 0);
+
+  display_signals[BELL] =
+    g_signal_new ("bell",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 1, META_TYPE_WINDOW);
 
   g_object_class_install_property (object_class,
                                    PROP_FOCUS_WINDOW,
@@ -505,10 +516,8 @@ meta_display_open (void)
   the_display->allow_terminal_deactivation = TRUE; /* Only relevant for when a
                                                   terminal has the focus */
 
-#ifdef HAVE_XSYNC
-  the_display->grab_sync_request_alarm = None;
-#endif
-  
+  the_display->rebuild_keybinding_idle_id = 0;
+
   /* FIXME copy the checks from GDK probably */
   the_display->static_gravity_works = g_getenv ("MUFFIN_USE_STATIC_GRAVITY") != NULL;
   
@@ -517,6 +526,8 @@ meta_display_open (void)
   meta_display_init_keys (the_display);
 
   update_window_grab_modifiers (the_display);
+  update_mouse_zoom_modifiers (the_display);
+  the_display->mouse_zoom_enabled = meta_prefs_get_mouse_zoom_enabled ();
 
   meta_prefs_add_listener (prefs_changed_callback, the_display);
 
@@ -617,8 +628,11 @@ meta_display_open (void)
         the_display->xsync_event_base = 0;
       }
     else
-      the_display->have_xsync = TRUE;
-    
+      {
+        the_display->have_xsync = TRUE;
+        XSyncSetPriority (the_display->xdisplay, None, 10);
+      }
+
     meta_verbose ("Attempted to init Xsync, found version %d.%d error base %d event base %d\n",
                   major, minor,
                   the_display->xsync_error_base,
@@ -1715,16 +1729,19 @@ event_callback (XEvent   *event,
     }
 
 #ifdef HAVE_XSYNC
-  if (META_DISPLAY_HAS_XSYNC (display) && 
-      event->type == (display->xsync_event_base + XSyncAlarmNotify) &&
-      ((XSyncAlarmNotifyEvent*)event)->alarm == display->grab_sync_request_alarm)
+  if (META_DISPLAY_HAS_XSYNC (display) &&
+      event->type == (display->xsync_event_base + XSyncAlarmNotify))
     {
-      filter_out_event = TRUE; /* GTK doesn't want to see this really */
-      
-      if (display->grab_op != META_GRAB_OP_NONE &&
-          display->grab_window != NULL &&
-          grab_op_is_mouse (display->grab_op))
-	meta_window_handle_mouse_grab_op_event (display->grab_window, event);
+      MetaWindow *alarm_window = meta_display_lookup_sync_alarm (display,
+                                                                 ((XSyncAlarmNotifyEvent*)event)->alarm);
+      if (alarm_window != NULL)
+        {
+          XSyncValue value = ((XSyncAlarmNotifyEvent*)event)->counter_value;
+          gint64 new_counter_value;
+          new_counter_value = XSyncValueLow32 (value) + ((gint64)XSyncValueHigh32 (value) << 32);
+          meta_window_update_sync_request_counter (alarm_window, new_counter_value);
+          filter_out_event = TRUE; /* GTK doesn't want to see this really */
+        }
     }
 #endif /* HAVE_XSYNC */
 
@@ -1761,9 +1778,8 @@ event_callback (XEvent   *event,
                               window->desc);
                 }
 
-              if (display->compositor)
-                meta_compositor_window_shape_changed (display->compositor,
-                                                      window);
+              meta_compositor_window_shape_changed (display->compositor,
+                                                    window);
             }
         }
       else
@@ -1818,9 +1834,9 @@ event_callback (XEvent   *event,
     case ButtonPress:
       if (display->grab_op == META_GRAB_OP_COMPOSITOR)
         break;
-      if (display->window_grab_modifiers > 0 && (event->xbutton.button == 4 || event->xbutton.button == 5))
+      if (display->mouse_zoom_modifiers > 0 && (event->xbutton.button == 4 || event->xbutton.button == 5))
         {
-          if ((event->xbutton.state & ~display->ignored_modifier_mask) == display->window_grab_modifiers)
+          if ((event->xbutton.state & ~display->ignored_modifier_mask) == display->mouse_zoom_modifiers)
             {
               if (event->xbutton.button == 4)
                 {
@@ -1860,8 +1876,10 @@ event_callback (XEvent   *event,
                 meta_stack_set_positions (screen->stack,
                                           display->grab_old_window_stacking);
             }
-          meta_display_end_grab_op (display,
-                                    event->xbutton.time);
+
+          if (display->grab_window->tile_mode == META_TILE_NONE)
+              meta_display_end_grab_op (display,
+                                        event->xbutton.time);
         }
       else if (window && display->grab_op == META_GRAB_OP_NONE)
         {
@@ -1889,7 +1907,8 @@ event_callback (XEvent   *event,
                */
               if (!frame_was_receiver)
                 {
-                  if (meta_prefs_get_raise_on_click ()) 
+                  if (meta_prefs_get_raise_on_click () &&
+                      !meta_ui_window_is_widget (display->active_screen->ui, modified))
                     meta_window_raise (window);
                   else
                     meta_topic (META_DEBUG_FOCUS,
@@ -1898,7 +1917,8 @@ event_callback (XEvent   *event,
                   /* Don't focus panels--they must explicitly request focus.
                    * See bug 160470
                    */
-		  if (window->type != META_WINDOW_DOCK)
+                  if (window->type != META_WINDOW_DOCK &&
+                      !meta_ui_window_is_widget (display->active_screen->ui, modified))
                     {
                       meta_topic (META_DEBUG_FOCUS,
                                   "Focusing %s due to unmodified button %u press (display.c)\n",
@@ -2288,7 +2308,7 @@ event_callback (XEvent   *event,
 
           if (display->grab_op != META_GRAB_OP_NONE &&
               display->grab_window == window &&
-              ((window->frame == NULL) || !window->frame->mapped))
+              window->frame == NULL)
             meta_display_end_grab_op (display, timestamp);
       
           if (!frame_was_receiver)
@@ -2325,8 +2345,7 @@ event_callback (XEvent   *event,
       /* NB: override redirect windows wont cause a map request so we
        * watch out for map notifies against any root windows too if a
        * compositor is enabled: */
-      if (display->compositor && window == NULL
-	  && meta_display_screen_for_root (display, event->xmap.event))
+      if (window == NULL && meta_display_screen_for_root (display, event->xmap.event))
         {
           window = meta_window_new (display, event->xmap.window,
                                     FALSE);
@@ -2701,7 +2720,7 @@ event_callback (XEvent   *event,
       break;
     }
 
-  if (display->compositor && !bypass_compositor)
+  if (!bypass_compositor)
     {
       if (meta_compositor_process_event (display->compositor,
                                          event,
@@ -3680,7 +3699,6 @@ meta_display_begin_grab_op (MetaDisplay *display,
   display->grab_motion_notify_time = 0;
   display->grab_old_window_stacking = NULL;
 #ifdef HAVE_XSYNC
-  display->grab_sync_request_alarm = None;
   display->grab_last_user_action_was_snap = FALSE;
 #endif
   display->grab_frame_action = frame_action;
@@ -3700,55 +3718,9 @@ meta_display_begin_grab_op (MetaDisplay *display,
 
 #ifdef HAVE_XSYNC
       if ( meta_grab_op_is_resizing (display->grab_op) &&
-          display->grab_window->sync_request_counter != None)
+           display->grab_window->sync_request_counter != None)
         {
-          XSyncAlarmAttributes values;
-	  XSyncValue init;
-
-          meta_error_trap_push_with_return (display);
-
-	  /* Set the counter to 0, so we know that the application's
-	   * responses to the client messages will always trigger
-	   * a PositiveTransition
-	   */
-	  
-	  XSyncIntToValue (&init, 0);
-	  XSyncSetCounter (display->xdisplay,
-			   display->grab_window->sync_request_counter, init);
-	  
-	  display->grab_window->sync_request_serial = 0;
-	  display->grab_window->sync_request_time.tv_sec = 0;
-	  display->grab_window->sync_request_time.tv_usec = 0;
-	  
-          values.trigger.counter = display->grab_window->sync_request_counter;
-          values.trigger.value_type = XSyncAbsolute;
-          values.trigger.test_type = XSyncPositiveTransition;
-          XSyncIntToValue (&values.trigger.wait_value,
-			   display->grab_window->sync_request_serial + 1);
-	  
-          /* After triggering, increment test_value by this.
-           * (NOT wait_value above)
-           */
-          XSyncIntToValue (&values.delta, 1);
-	  
-          /* we want events (on by default anyway) */
-          values.events = True;
-          
-          display->grab_sync_request_alarm = XSyncCreateAlarm (display->xdisplay,
-                                                         XSyncCACounter |
-                                                         XSyncCAValueType |
-                                                         XSyncCAValue |
-                                                         XSyncCATestType |
-                                                         XSyncCADelta |
-                                                         XSyncCAEvents,
-                                                         &values);
-
-          if (meta_error_trap_pop_with_return (display) != Success)
-	    display->grab_sync_request_alarm = None;
-
-          meta_topic (META_DEBUG_RESIZING,
-                      "Created update alarm 0x%lx\n",
-                      display->grab_sync_request_alarm);
+          meta_window_create_sync_request_alarm (display->grab_window);
         }
 #endif
     }
@@ -3780,6 +3752,39 @@ meta_display_begin_grab_op (MetaDisplay *display,
   
   return TRUE;
 }
+
+#ifdef HAVE_XSYNC
+/* We store sync alarms in the window ID hash table, because they are
+ * just more types of XIDs in the same global space, but we have
+ * typesafe functions to register/unregister for readability.
+ */
+
+MetaWindow*
+meta_display_lookup_sync_alarm (MetaDisplay *display,
+                                XSyncAlarm   alarm)
+{
+  return g_hash_table_lookup (display->window_ids, &alarm);
+}
+
+void
+meta_display_register_sync_alarm (MetaDisplay *display,
+                                  XSyncAlarm  *alarmp,
+                                  MetaWindow  *window)
+{
+  g_return_if_fail (g_hash_table_lookup (display->window_ids, alarmp) == NULL);
+
+  g_hash_table_insert (display->window_ids, alarmp, window);
+}
+
+void
+meta_display_unregister_sync_alarm (MetaDisplay *display,
+                                    XSyncAlarm   alarm)
+{
+  g_return_if_fail (g_hash_table_lookup (display->window_ids, &alarm) != NULL);
+
+  g_hash_table_remove (display->window_ids, &alarm);
+}
+#endif /* HAVE_XSYNC */
 
 void
 meta_display_end_grab_op (MetaDisplay *display,
@@ -3815,11 +3820,6 @@ meta_display_end_grab_op (MetaDisplay *display,
   if (GRAB_OP_IS_WINDOW_SWITCH (display->grab_op) ||
       display->grab_op == META_GRAB_OP_KEYBOARD_WORKSPACE_SWITCHING)
     {
-      if (GRAB_OP_IS_WINDOW_SWITCH (display->grab_op))
-        meta_screen_tab_popup_destroy (display->grab_screen);
-      else
-        meta_screen_workspace_popup_destroy (display->grab_screen);
-
       /* If the ungrab here causes an EnterNotify, ignore it for
        * sloppy focus
        */
@@ -3861,15 +3861,16 @@ meta_display_end_grab_op (MetaDisplay *display,
         meta_screen_ungrab_all_keys (display->grab_screen, timestamp);
     }
 
-#ifdef HAVE_XSYNC
-  if (display->grab_sync_request_alarm != None)
-    {
-      XSyncDestroyAlarm (display->xdisplay,
-                         display->grab_sync_request_alarm);
-      display->grab_sync_request_alarm = None;
-    }
-#endif /* HAVE_XSYNC */
-  
+  if (display->grab_window &&
+      display->grab_window->resizing_tile_type != META_WINDOW_TILE_TYPE_NONE) {
+    display->grab_window->snap_queued = display->grab_window->resizing_tile_type == META_WINDOW_TILE_TYPE_SNAPPED;
+    display->grab_window->tile_mode = display->grab_window->resize_tile_mode;
+    display->grab_window->custom_snap_size = TRUE;
+    meta_window_real_tile (display->grab_window, TRUE);
+  }
+
+  meta_screen_hide_hud_and_preview (display->grab_screen);
+
   display->grab_window = NULL;
   display->grab_screen = NULL;
   display->grab_xwindow = None;
@@ -4006,7 +4007,7 @@ meta_display_grab_window_buttons (MetaDisplay *display,
     {
       gboolean debug = g_getenv ("MUFFIN_DEBUG_BUTTON_GRABS") != NULL;
       int i;
-      for (i = 1; i < 6; i++)
+      for (i = 1; i < 4; i++)
         {
           meta_change_button_grab (display, xwindow,
                                    TRUE,
@@ -4034,6 +4035,28 @@ meta_display_grab_window_buttons (MetaDisplay *display,
                                FALSE,
                                1, display->window_grab_modifiers | ShiftMask);
     }
+
+  if (display->mouse_zoom_enabled && display->mouse_zoom_modifiers != 0)
+    {
+      gboolean debug = g_getenv ("MUFFIN_DEBUG_BUTTON_GRABS") != NULL;
+      int i;
+      for (i = 4; i < 6; i++)
+        {
+          meta_change_button_grab (display, xwindow,
+                                   TRUE,
+                                   FALSE,
+                                   i, display->mouse_zoom_modifiers);
+
+          /* This is for debugging, since I end up moving the Xnest
+           * otherwise ;-)
+           */
+          if (debug)
+            meta_change_button_grab (display, xwindow,
+                                     TRUE,
+                                     FALSE,
+                                     i, ControlMask);
+        }
+    }
 }
 
 LOCAL_SYMBOL void
@@ -4048,7 +4071,7 @@ meta_display_ungrab_window_buttons  (MetaDisplay *display,
   
   debug = g_getenv ("MUFFIN_DEBUG_BUTTON_GRABS") != NULL;
   i = 1;
-  while (i < 6)
+  while (i < 4)
     {
       meta_change_button_grab (display, xwindow,
                                FALSE, FALSE, i,
@@ -4058,6 +4081,23 @@ meta_display_ungrab_window_buttons  (MetaDisplay *display,
         meta_change_button_grab (display, xwindow,
                                  FALSE, FALSE, i, ControlMask);
       
+      ++i;
+    }
+
+  if (display->mouse_zoom_modifiers == 0)
+    return;
+
+  i = 4;
+  while (i < 6)
+    {
+      meta_change_button_grab (display, xwindow,
+                               FALSE, FALSE, i,
+                               display->mouse_zoom_modifiers);
+
+      if (debug)
+        meta_change_button_grab (display, xwindow,
+                                 FALSE, FALSE, i, ControlMask);
+
       ++i;
     }
 }
@@ -4865,6 +4905,48 @@ meta_resize_gravity_from_grab_op (MetaGrabOp op)
   return gravity;
 }
 
+LOCAL_SYMBOL int
+meta_resize_gravity_from_tile_mode (MetaTileMode mode)
+{
+  int gravity;
+  
+  gravity = -1;
+  switch (mode)
+    {
+      case META_TILE_LEFT:
+        gravity = WestGravity;
+        break;
+      case META_TILE_RIGHT:
+        gravity = EastGravity;
+        break;
+      case META_TILE_TOP:
+        gravity = NorthGravity;
+        break;
+      case META_TILE_BOTTOM:
+        gravity = SouthGravity;
+        break;
+      case META_TILE_ULC:
+        gravity = NorthWestGravity;
+        break;
+      case META_TILE_LLC:
+        gravity = SouthWestGravity;
+        break;
+      case META_TILE_URC:
+        gravity = NorthEastGravity;
+        break;
+      case META_TILE_LRC:
+        gravity = SouthEastGravity;
+        break;
+      case META_TILE_MAXIMIZE:
+        gravity = CenterGravity;
+        break;
+      default:
+        break;
+    }
+
+  return gravity;
+}
+
 static MetaScreen*
 find_screen_for_selection (MetaDisplay *display,
                            Window       owner,
@@ -5220,17 +5302,30 @@ update_window_grab_modifiers (MetaDisplay *display)
 }
 
 static void
+update_mouse_zoom_modifiers (MetaDisplay *display)
+{
+  MetaVirtualModifier virtual_mods;
+  unsigned int mods;
+
+  virtual_mods = meta_prefs_get_mouse_button_zoom_mods ();
+  meta_display_devirtualize_modifiers (display, virtual_mods,
+                                       &mods);
+
+  display->mouse_zoom_modifiers = mods;
+}
+
+static void
 prefs_changed_callback (MetaPreference pref,
                         void          *data)
 {
-  MetaDisplay *display = data;
-  
   /* It may not be obvious why we regrab on focus mode
    * change; it's because we handle focus clicks a
    * bit differently for the different focus modes.
    */
   if (pref == META_PREF_MOUSE_BUTTON_MODS ||
-      pref == META_PREF_FOCUS_MODE)
+      pref == META_PREF_FOCUS_MODE ||
+      pref == META_PREF_MOUSE_BUTTON_ZOOM_MODS ||
+      pref == META_PREF_MOUSE_ZOOM_ENABLED)
     {
       MetaDisplay *display = data;
       GSList *windows;
@@ -5252,6 +5347,11 @@ prefs_changed_callback (MetaPreference pref,
       if (pref == META_PREF_MOUSE_BUTTON_MODS)
         update_window_grab_modifiers (display);
 
+      if (pref == META_PREF_MOUSE_BUTTON_ZOOM_MODS)
+        update_mouse_zoom_modifiers (display);
+
+      display->mouse_zoom_enabled = meta_prefs_get_mouse_zoom_enabled ();
+
       /* Grab all */
       tmp = windows;
       while (tmp != NULL)
@@ -5266,10 +5366,6 @@ prefs_changed_callback (MetaPreference pref,
         }
 
       g_slist_free (windows);
-    }
-  else if (pref == META_PREF_AUDIBLE_BELL)
-    {
-      meta_bell_set_audible (display, meta_prefs_bell_is_audible ());
     }
 }
 
@@ -5557,7 +5653,7 @@ Atom meta_display_get_atom (MetaDisplay *display, MetaAtom meta_atom)
  * _NET_SUPPORTING_WM_CHECK mechanism of EWMH). For use by plugins that wish
  * to attach additional custom properties to this window.
  *
- * Return value: (transfer none): xid of the leader window.
+ * Return value: xid of the leader window.
  **/
 Window
 meta_display_get_leader_window (MetaDisplay *display)

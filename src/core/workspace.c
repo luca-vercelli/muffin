@@ -1,7 +1,5 @@
 /* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
 
-/* Muffin Workspaces */
-
 /* 
  * Copyright (C) 2001 Havoc Pennington
  * Copyright (C) 2003 Rob Adams
@@ -22,6 +20,19 @@
  * Foundation, Inc., 51 Franklin Street - Suite 500, Boston, MA
  * 02110-1335, USA.
  */
+
+/**
+ * SECTION:workspace
+ * @title: MetaWorkspace
+ * @short_description: Workspaces
+ *
+ * A workspace is a set of windows which all live on the same
+ * screen.  (You may also see the name "desktop" around the place,
+ * which is the EWMH's name for the same thing.)  Only one workspace
+ * of a screen may be active at once; all windows on all other workspaces
+ * are unmapped.
+ */
+
 
 #include <config.h>
 #include "screen-private.h"
@@ -506,29 +517,64 @@ workspace_switch_sound(MetaWorkspace *from,
 #endif /* HAVE_LIBCANBERRA */
 }
 
-/**
- * meta_workspace_activate_with_focus:
- * @workspace: a #MetaWorkspace
- * @focus_this: the #MetaWindow to be focused, or %NULL
- * @timestamp: timestamp for @focus_this
- *
- * Switches to @workspace and possibly activates the window @focus_this.
- *
- * The window @focus_this is activated by calling meta_window_activate()
- * which will unminimize it and transient parents, raise it and give it
- * the focus.
- *
- * If a window is currently being moved by the user, it will be
- * moved to @workspace.
- *
- * The advantage of calling this function instead of meta_workspace_activate()
- * followed by meta_window_activate() is that it happens as a unit, so
- * no other window gets focused first before @focus_this.
- */
-void
-meta_workspace_activate_with_focus (MetaWorkspace *workspace,
-                                    MetaWindow    *focus_this,
-                                    guint32        timestamp)
+static MetaMotionDirection
+get_wrapped_horizontal_direction (gint                from,
+                                  gint                to,
+                                  MetaMotionDirection suggested_dir,
+                                  gint                num_workspaces)
+{
+  MetaMotionDirection ret = 0;
+  gboolean wrap = meta_prefs_get_workspace_cycle();
+
+  if (suggested_dir != 0 && wrap)
+    {
+      if (meta_ui_get_direction () == META_UI_DIRECTION_RTL)
+        {
+          if (suggested_dir == META_MOTION_LEFT)
+            suggested_dir = META_MOTION_RIGHT;
+          else
+          if (suggested_dir == META_MOTION_RIGHT)
+            suggested_dir = META_MOTION_LEFT;
+        }
+
+      return suggested_dir;
+    }
+
+  if (meta_ui_get_direction() == META_UI_DIRECTION_RTL)
+    {
+      if (from < to)
+        if (wrap)
+          ret = (to - from) <= ((num_workspaces - to) + from) ? META_MOTION_LEFT : META_MOTION_RIGHT;
+        else
+          ret = META_MOTION_LEFT;
+      else
+        if (wrap)
+          ret = (from - to) <= ((num_workspaces - from) + to) ? META_MOTION_RIGHT : META_MOTION_LEFT;
+        else
+          ret = META_MOTION_RIGHT;
+    }
+  else
+    {
+      if (from < to)
+        if (wrap)
+          ret = (to - from) <= ((num_workspaces - to) + from) ? META_MOTION_RIGHT : META_MOTION_LEFT;
+        else
+          ret = META_MOTION_RIGHT;
+      else
+        if (wrap)
+          ret = (from - to) <= ((num_workspaces - from) + to) ? META_MOTION_LEFT : META_MOTION_RIGHT;
+        else
+          ret = META_MOTION_LEFT;
+    }
+
+  return ret;
+}
+
+static void
+meta_workspace_activate_internal (MetaWorkspace       *workspace,
+                                  MetaWindow          *focus_this,
+                                  MetaMotionDirection  suggested_dir,
+                                  guint32              timestamp)
 {
   MetaWorkspace  *old;
   MetaWindow     *move_window;
@@ -618,20 +664,7 @@ meta_workspace_activate_with_focus (MetaWorkspace *workspace,
    meta_screen_calc_workspace_layout (workspace->screen, num_workspaces,
                                       new_space, &layout2);
 
-   if (meta_ui_get_direction() == META_UI_DIRECTION_RTL)
-     {
-       if (layout1.current_col > layout2.current_col)
-         direction = META_MOTION_RIGHT;
-       else if (layout1.current_col < layout2.current_col)
-         direction = META_MOTION_LEFT;
-     }
-   else
-    {
-       if (layout1.current_col < layout2.current_col)
-         direction = META_MOTION_RIGHT;
-       else if (layout1.current_col > layout2.current_col)
-         direction = META_MOTION_LEFT;
-    }
+   direction = get_wrapped_horizontal_direction (layout1.current_col, layout2.current_col, suggested_dir, num_workspaces);
 
    if (layout1.current_row < layout2.current_row)
      {
@@ -681,11 +714,55 @@ meta_workspace_activate_with_focus (MetaWorkspace *workspace,
    meta_screen_workspace_switched (screen, current_space, new_space, direction);
 }
 
+/**
+ * meta_workspace_activate_with_focus:
+ * @workspace: a #MetaWorkspace
+ * @focus_this: the #MetaWindow to be focused, or %NULL
+ * @timestamp: timestamp for @focus_this
+ *
+ * Switches to @workspace and possibly activates the window @focus_this.
+ *
+ * The window @focus_this is activated by calling meta_window_activate()
+ * which will unminimize it and transient parents, raise it and give it
+ * the focus.
+ *
+ * If a window is currently being moved by the user, it will be
+ * moved to @workspace.
+ *
+ * The advantage of calling this function instead of meta_workspace_activate()
+ * followed by meta_window_activate() is that it happens as a unit, so
+ * no other window gets focused first before @focus_this.
+ */
+void
+meta_workspace_activate_with_focus (MetaWorkspace *workspace,
+                                    MetaWindow    *focus_this,
+                                    guint32        timestamp)
+{
+  meta_workspace_activate_internal (workspace, focus_this, 0, timestamp);
+}
+
 void
 meta_workspace_activate (MetaWorkspace *workspace,
                          guint32        timestamp)
 {
-  meta_workspace_activate_with_focus (workspace, NULL, timestamp);
+  meta_workspace_activate_internal (workspace, NULL, 0, timestamp);
+}
+
+/**
+ * meta_workspace_activate_with_direction_hint:
+ * @workspace: a #MetaWorkspace
+ * @direction: the suggested #MetaMotionDirection
+ * @timestamp: timestamp for @focus_this
+ *
+ * Switches to @workspace in the specified @direction (if possible)
+ */
+
+void
+meta_workspace_activate_with_direction_hint (MetaWorkspace       *workspace,
+                                             MetaMotionDirection  direction,
+                                             guint32              timestamp)
+{
+  meta_workspace_activate_internal (workspace, NULL, direction, timestamp);
 }
 
 int
@@ -994,18 +1071,6 @@ ensure_work_areas_validated (MetaWorkspace *workspace)
 
   /* We're all done, YAAY!  Record that everything has been validated. */
   workspace->work_areas_invalid = FALSE;
-
-  {
-    /*
-     * Notify the compositor that the workspace geometry has changed.
-     */
-    MetaScreen     *screen = workspace->screen;
-    MetaDisplay    *display = meta_screen_get_display (screen);
-    MetaCompositor *comp = meta_display_get_compositor (display);
-
-    if (comp)
-      meta_compositor_update_workspace_geometry (comp, workspace);
-  }
 }
 
 static gboolean
@@ -1038,6 +1103,45 @@ void
 meta_workspace_set_builtin_struts (MetaWorkspace *workspace,
                                    GSList        *struts)
 {
+  MetaScreen *screen = workspace->screen;
+  GSList *l;
+
+  for (l = struts; l; l = l->next)
+    {
+      MetaStrut *strut = l->data;
+      int idx = meta_screen_get_monitor_index_for_rect (screen, &strut->rect);
+
+      switch (strut->side)
+        {
+        case META_SIDE_TOP:
+          if (meta_screen_get_monitor_neighbor (screen, idx, META_SCREEN_UP))
+            continue;
+
+          strut->rect.height += strut->rect.y;
+          strut->rect.y = 0;
+          break;
+        case META_SIDE_BOTTOM:
+          if (meta_screen_get_monitor_neighbor (screen, idx, META_SCREEN_DOWN))
+            continue;
+
+          strut->rect.height = screen->rect.height - strut->rect.y;
+          break;
+        case META_SIDE_LEFT:
+          if (meta_screen_get_monitor_neighbor (screen, idx, META_SCREEN_LEFT))
+            continue;
+
+          strut->rect.width += strut->rect.x;
+          strut->rect.x = 0;
+          break;
+        case META_SIDE_RIGHT:
+          if (meta_screen_get_monitor_neighbor (screen, idx, META_SCREEN_RIGHT))
+            continue;
+
+          strut->rect.width = screen->rect.width - strut->rect.x;
+          break;
+        }
+    }
+    
   /* Reordering doesn't actually matter, so we don't catch all
    * no-impact changes, but this is just a (possibly unnecessary
    * anyways) optimization */
@@ -1241,7 +1345,7 @@ meta_workspace_get_name (MetaWorkspace *workspace)
   return meta_prefs_get_workspace_name (meta_workspace_index (workspace));
 }
 
-LOCAL_SYMBOL void
+void
 meta_workspace_focus_default_window (MetaWorkspace *workspace,
                                      MetaWindow    *not_this_one,
                                      guint32        timestamp)
@@ -1377,18 +1481,4 @@ focus_ancestor_or_top_window (MetaWorkspace *workspace,
                                               workspace->screen,
                                               timestamp);
     }
-}
-
-/**
- * meta_workspace_get_screen:
- * @workspace: a #MetaWorkspace
- *
- * Gets the #MetaScreen that the workspace is part of.
- *
- * Return value: (transfer none): the #MetaScreen for the workspace
- */
-MetaScreen *
-meta_workspace_get_screen (MetaWorkspace *workspace)
-{
-  return workspace->screen;
 }

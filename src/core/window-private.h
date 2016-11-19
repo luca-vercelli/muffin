@@ -95,6 +95,12 @@ enum {
 #define HUD_WIDTH 24
 #define CSD_TITLEBAR_HEIGHT 48
 
+typedef enum {
+  _NET_WM_BYPASS_COMPOSITOR_HINT_AUTO = 0,
+  _NET_WM_BYPASS_COMPOSITOR_HINT_ON = 1,
+  _NET_WM_BYPASS_COMPOSITOR_HINT_OFF = 2,
+} MetaBypassCompositorHintValue;
+
 struct _MetaWindow
 {
   GObject parent_instance;
@@ -269,6 +275,9 @@ struct _MetaWindow
   
   /* whether net_wm_user_time has been set yet */
   guint net_wm_user_time_set : 1;
+
+  /* whether net_wm_icon_geometry has been set */
+  guint icon_geometry_set: 1;
   
   /* These are the flags from WM_PROTOCOLS */
   guint take_focus : 1;
@@ -385,14 +394,21 @@ struct _MetaWindow
   /* if non-NULL, the bounds of the window frame */
   cairo_region_t *frame_bounds;
 
+  /* if TRUE, the we have the new form of sync request counter which
+   * also handles application frames */
+  guint extended_sync_request_counter : 1;
+
   /* Note: can be NULL */
   GSList *struts;
 
 #ifdef HAVE_XSYNC
   /* XSync update counter */
   XSyncCounter sync_request_counter;
-  guint sync_request_serial;
-  GTimeVal sync_request_time;
+  gint64 sync_request_serial;
+  gint64 sync_request_wait_serial;
+  guint sync_request_timeout_id;
+  /* alarm monitoring client's _NET_WM_SYNC_REQUEST_COUNTER */
+  XSyncAlarm sync_request_alarm;
 #endif
   
   /* Number of UnmapNotify that are caused by us, if
@@ -445,6 +461,9 @@ struct _MetaWindow
 
   MetaRectangle snapped_rect;
 
+  /* Cached net_wm_icon_geometry */
+  MetaRectangle icon_geometry;
+
   /* Requested geometry */
   int border_width;
   /* x/y/w/h here get filled with ConfigureRequest values */
@@ -469,8 +488,7 @@ struct _MetaWindow
   MetaWindow *tile_match;
 
   /* Bypass compositor hints */
-  guint bypass_compositor : 1;
-  guint dont_bypass_compositor : 1;
+  guint bypass_compositor;
 };
 
 struct _MetaWindowClass
@@ -547,7 +565,6 @@ MetaWindow* meta_window_new_with_attrs     (MetaDisplay       *display,
                                             XWindowAttributes *attrs);
 void        meta_window_unmanage           (MetaWindow  *window,
                                             guint32      timestamp);
-void        meta_window_calc_showing       (MetaWindow  *window);
 void        meta_window_queue              (MetaWindow  *window,
                                             guint queuebits);
 void        meta_window_real_tile          (MetaWindow        *window,
@@ -656,6 +673,8 @@ void meta_window_send_icccm_message (MetaWindow *window,
                                      Atom        atom,
                                      guint32     timestamp);
 
+void meta_window_create_sync_request_alarm  (MetaWindow *window);
+void meta_window_destroy_sync_request_alarm (MetaWindow *window);
 
 void     meta_window_move_resize_request(MetaWindow *window,
                                          guint       value_mask,
@@ -688,6 +707,11 @@ void     meta_window_shove_titlebar_onscreen (MetaWindow *window);
 
 void meta_window_set_gravity (MetaWindow *window,
                               int         gravity);
+
+#ifdef HAVE_XSYNC
+ void meta_window_update_sync_request_counter (MetaWindow *window,
+                                               gint64      new_counter_value);
+#endif /* HAVE_XSYNC */
 
 void meta_window_handle_mouse_grab_op_event (MetaWindow *window,
                                              XEvent     *event);
@@ -776,12 +800,6 @@ gboolean meta_window_can_tile_top_bottom (MetaWindow *window);
 gboolean meta_window_can_tile_corner         (MetaWindow *window);
 MetaSide meta_window_get_tile_side (MetaWindow *window);
 
-inline void meta_window_get_size_limits   (const MetaWindow        *window,
-                                          const MetaFrameBorders  *borders,
-                                          gboolean include_frame,
-                                          MetaRectangle *min_size,
-                                          MetaRectangle *max_size);
-
 void meta_window_compute_tile_match (MetaWindow *window);
 
 gboolean meta_window_mouse_on_edge (MetaWindow *window,
@@ -802,4 +820,12 @@ MetaWindowTileType  meta_window_get_tile_type (MetaWindow *window);
 gboolean meta_window_is_client_decorated (MetaWindow *window);
 
 
+gboolean meta_window_updates_are_frozen (MetaWindow *window);
+
+void meta_window_extend_by_frame (MetaWindow              *window,
+                                  MetaRectangle           *rect,
+                                  const MetaFrameBorders  *borders);
+void meta_window_unextend_by_frame (MetaWindow              *window,
+                                    MetaRectangle           *rect,
+                                    const MetaFrameBorders  *borders);
 #endif

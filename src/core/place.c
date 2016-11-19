@@ -130,7 +130,7 @@ place_by_pointer(MetaWindow *window,
 }
 
 static gboolean
-place_in_center(MetaWindow *window,
+place_in_center (MetaWindow *window,
                  MetaFrameBorders *borders,
                  MetaPlacementMode placement_mode,
                  int *new_x,
@@ -138,9 +138,10 @@ place_in_center(MetaWindow *window,
 {
   int center_x, center_y;
   const MetaMonitorInfo *xi;
-  xi = meta_screen_get_current_monitor (window->screen);
-  center_x = xi->rect.width / 2;
-  center_y = xi->rect.height / 2;
+
+  xi = meta_screen_get_current_monitor_info (window->screen);
+  center_x = *new_x + xi->rect.width / 2;
+  center_y = *new_y + xi->rect.height / 2;
 
   int window_width, window_height;
   window_width = window->frame ? window->frame->rect.width : window->rect.width;
@@ -176,7 +177,7 @@ find_next_cascade (MetaWindow *window,
   int window_width, window_height;
   int cascade_stage;
   MetaRectangle work_area;
-  const MetaMonitorInfo* current;
+  int current;
   
   sorted = g_list_copy (windows);
   sorted = g_list_sort (sorted, northwestcmp);
@@ -202,7 +203,7 @@ find_next_cascade (MetaWindow *window,
    */
 
   current = meta_screen_get_current_monitor (window->screen);
-  meta_window_get_work_area_for_monitor (window, current->number, &work_area);
+  meta_window_get_work_area_for_monitor (window, current, &work_area);
 
   cascade_x = MAX (0, work_area.x);
   cascade_y = MAX (0, work_area.y);
@@ -880,7 +881,7 @@ meta_window_place (MetaWindow        *window,
       int w, h;
 
       /* Warning, this function is a round trip! */
-      xi = meta_screen_get_current_monitor (window->screen);
+      xi = meta_screen_get_current_monitor_info (window->screen);
 
       w = xi->rect.width;
       h = xi->rect.height;
@@ -927,7 +928,7 @@ meta_window_place (MetaWindow        *window,
   }
 
   /* Warning, this is a round trip! */
-  xi = meta_screen_get_current_monitor (window->screen);
+  xi = meta_screen_get_current_monitor_info (window->screen);
   
   /* "Origin" placement algorithm */
   x = xi->rect.x;

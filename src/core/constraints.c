@@ -204,12 +204,12 @@ static void place_window_if_needed       (MetaWindow     *window,
                                           ConstraintInfo *info);
 static void update_onscreen_requirements (MetaWindow     *window,
                                           ConstraintInfo *info);
-static void extend_by_frame              (MetaWindow *window,
-                                          MetaRectangle           *rect,
-                                          const MetaFrameBorders  *borders);
-static void unextend_by_frame            (MetaWindow *window,
-                                          MetaRectangle           *rect,
-                                          const MetaFrameBorders  *borders);
+
+static inline void get_size_limits   (const MetaWindow        *window,
+                                      const MetaFrameBorders  *borders,
+                                            gboolean           include_frame,
+                                            MetaRectangle     *min_size,
+                                            MetaRectangle     *max_size);
 
 typedef gboolean (* ConstraintFunc) (MetaWindow         *window,
                                      ConstraintInfo     *info,
@@ -674,7 +674,7 @@ update_onscreen_requirements (MetaWindow     *window,
   /* The require onscreen/on-single-monitor and titlebar_visible
    * stuff is relative to the outer window, not the inner
    */
-  extend_by_frame (window, &info->current, info->borders);
+  meta_window_extend_by_frame (window, &info->current, info->borders);
 
   /* Update whether we want future constraint runs to require the
    * window to be on fully onscreen.
@@ -726,50 +726,42 @@ update_onscreen_requirements (MetaWindow     *window,
 
 
   /* Don't forget to restore the position of the window */
-  unextend_by_frame (window, &info->current, info->borders);
+  meta_window_unextend_by_frame (window, &info->current, info->borders);
 }
 
-static void
-extend_by_frame (MetaWindow              *window,
-                 MetaRectangle           *rect,
-                 const MetaFrameBorders  *borders)
+static inline void
+get_size_limits (const MetaWindow       *window,
+                 const MetaFrameBorders *borders,
+                       gboolean          include_frame,
+                       MetaRectangle    *min_size,
+                       MetaRectangle    *max_size)
 {
-  if (window->frame)
-    {
-      rect->x -= borders->visible.left;
-      rect->y -= borders->visible.top;
-      rect->width  += borders->visible.left + borders->visible.right;
-      rect->height += borders->visible.top + borders->visible.bottom;
-    }
-  else if (meta_window_is_client_decorated (window))
-    {
-      const GtkBorder *extents = &window->custom_frame_extents;
-      rect->x += extents->left;
-      rect->y += extents->top;
-      rect->width -= extents->left + extents->right;
-      rect->height -= extents->top + extents->bottom;
-    }
-}
+  /* We pack the results into MetaRectangle structs just for convienience; we
+   * don't actually use the position of those rects.
+   */
+  min_size->width  = window->size_hints.min_width;
+  min_size->height = window->size_hints.min_height;
+  max_size->width  = window->size_hints.max_width;
+  max_size->height = window->size_hints.max_height;
 
-static void
-unextend_by_frame (MetaWindow              *window,
-                   MetaRectangle           *rect,
-                   const MetaFrameBorders  *borders)
-{
-  if (window->frame)
+  if (include_frame)
     {
-      rect->x += borders->visible.left;
-      rect->y += borders->visible.top;
-      rect->width  -= borders->visible.left + borders->visible.right;
-      rect->height -= borders->visible.top + borders->visible.bottom;
-    }
-  else if (meta_window_is_client_decorated (window))
-    {
-      const GtkBorder *extents = &window->custom_frame_extents;
-      rect->x -= extents->left;
-      rect->y -= extents->top;
-      rect->width += extents->left + extents->right;
-      rect->height += extents->top + extents->bottom;
+      int fw = borders->visible.left + borders->visible.right;
+      int fh = borders->visible.top + borders->visible.bottom;
+
+      min_size->width  += fw;
+      min_size->height += fh;
+      /* Do check to avoid overflow (e.g. max_size->width & max_size->height
+       * may be set to G_MAXINT by meta_set_normal_hints()).
+       */
+      if (max_size->width < (G_MAXINT - fw))
+        max_size->width += fw;
+      else
+        max_size->width = G_MAXINT;
+      if (max_size->height < (G_MAXINT - fh))
+        max_size->height += fh;
+      else
+        max_size->height = G_MAXINT;
     }
 }
 
@@ -787,21 +779,12 @@ constrain_modal_dialog (MetaWindow         *window,
     return TRUE;
 
   x = parent->rect.x + (parent->rect.width / 2  - info->current.width / 2);
-  y = 0;
+  y = parent->rect.y + (parent->rect.height / 2 - info->current.height / 2);
   if (parent->frame)
     {
-      MetaFrameBorders borders;
-
       x += parent->frame->rect.x;
       y += parent->frame->rect.y;
-
-      meta_frame_calc_borders (parent->frame, &borders);
-      y += borders.total.top;
-
-      y += info->borders->visible.top;
     }
-  else
-    y = parent->rect.y + info->borders->visible.top;
 
   constraint_already_satisfied = (x == info->current.x) && (y == info->current.y);
 
@@ -839,7 +822,8 @@ constrain_maximization (MetaWindow         *window,
     return TRUE;
 
   /* Calculate target_size = maximized size of (window + frame) */
-  if (META_WINDOW_MAXIMIZED (window) && g_list_length (window->workspace->snapped_windows) == 0)
+  if (META_WINDOW_MAXIMIZED (window) &&
+      (g_list_length (window->workspace->snapped_windows) == 0 || window->type == META_WINDOW_DESKTOP))
     {
       target_size = info->work_area_monitor;
     }
@@ -882,7 +866,7 @@ constrain_maximization (MetaWindow         *window,
         }
 
         target_size = info->current;
-        extend_by_frame (window, &target_size, info->borders);
+        meta_window_extend_by_frame (window, &target_size, info->borders);
         meta_rectangle_expand_to_snapped_borders (&target_size,
                                                   &info->entire_monitor,
                                                    active_workspace_struts,
@@ -891,7 +875,6 @@ constrain_maximization (MetaWindow         *window,
         g_slist_free (snapped_windows_as_struts);
       } else {
           target_size = info->current;
-          extend_by_frame (window, &target_size, info->borders);
           meta_rectangle_expand_to_avoiding_struts (&target_size,
                                                     &info->entire_monitor,
                                                     direction,
@@ -899,12 +882,13 @@ constrain_maximization (MetaWindow         *window,
       }
    }
   /* Now make target_size = maximized size of client window */
-  unextend_by_frame (window, &target_size, info->borders);
+  if (!meta_window_is_client_decorated(window))
+    meta_window_unextend_by_frame (window, &target_size, info->borders);
 
   /* Check min size constraints; max size constraints are ignored for maximized
    * windows, as per bug 327543.
    */
-  meta_window_get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
+  get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
   hminbad = target_size.width < min_size.width && window->maximized_horizontally;
   vminbad = target_size.height < min_size.height && window->maximized_vertically;
   if (hminbad || vminbad)
@@ -952,7 +936,7 @@ constrain_tiling (MetaWindow         *window,
     return TRUE;
 
   /* Determine whether constraint applies; exit if it doesn't */
-  if (!META_WINDOW_TILED_OR_SNAPPED (window))
+  if (!META_WINDOW_TILED_OR_SNAPPED (window) || window->resizing_tile_type != META_WINDOW_TILE_TYPE_NONE)
     return TRUE;
 
   /* Calculate target_size - as the tile previews need this as well, we
@@ -1054,12 +1038,12 @@ constrain_tiling (MetaWindow         *window,
       }
   }
 
-  unextend_by_frame (window, &target_size, info->borders);
+  meta_window_unextend_by_frame (window, &target_size, info->borders);
 
   /* Check min size constraints; max size constraints are ignored as for
    * maximized windows.
    */
-  meta_window_get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
+  get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
   hminbad = target_size.width < min_size.width;
   vminbad = target_size.height < min_size.height;
   if (hminbad || vminbad)
@@ -1102,7 +1086,7 @@ constrain_fullscreen (MetaWindow         *window,
 
   monitor = info->entire_monitor;
 
-  meta_window_get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
+  get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
   too_big =   !meta_rectangle_could_fit_rect (&monitor, &min_size);
   too_small = !meta_rectangle_could_fit_rect (&max_size, &monitor);
   if (too_big || too_small)
@@ -1212,7 +1196,7 @@ constrain_size_limits (MetaWindow         *window,
     return TRUE;
 
   /* Determine whether constraint is already satisfied; exit if it is */
-  meta_window_get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
+  get_size_limits (window, info->borders, FALSE, &min_size, &max_size);
   /* We ignore max-size limits for maximized windows; see #327543 */
   if (window->maximized_horizontally)
     max_size.width = MAX (max_size.width, info->current.width);
@@ -1404,8 +1388,8 @@ do_screen_and_monitor_relative_constraints (
 
   /* Determine whether constraint applies; exit if it doesn't */
   how_far_it_can_be_smushed = info->current;
-  meta_window_get_size_limits (window, info->borders, TRUE, &min_size, &max_size);
-  extend_by_frame (window, &info->current, info->borders);
+  get_size_limits (window, info->borders, TRUE, &min_size, &max_size);
+  meta_window_extend_by_frame (window, &info->current, info->borders);
 
   if (info->action_type != ACTION_MOVE)
     {
@@ -1425,7 +1409,7 @@ do_screen_and_monitor_relative_constraints (
                                         &info->current);
   if (exit_early || constraint_satisfied || check_only)
     {
-      unextend_by_frame (window, &info->current, info->borders);
+      meta_window_unextend_by_frame (window, &info->current, info->borders);
       return constraint_satisfied;
     }
 
@@ -1451,7 +1435,7 @@ do_screen_and_monitor_relative_constraints (
                                         &info->current);
     }
 
-  unextend_by_frame (window, &info->current, info->borders);
+  meta_window_unextend_by_frame (window, &info->current, info->borders);
   return TRUE;
 }
 

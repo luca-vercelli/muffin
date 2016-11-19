@@ -1,5 +1,11 @@
 /* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
 
+/**
+ * SECTION:meta-window-actor
+ * @title: MetaWindowActor
+ * @short_description: An actor representing a top-level window in the scene graph
+ */
+
 #include <config.h>
 
 #include <math.h>
@@ -10,7 +16,6 @@
 #include <X11/extensions/Xrender.h>
 
 #include <clutter/x11/clutter-x11.h>
-#define COGL_ENABLE_EXPERIMENTAL_API
 #include <cogl/cogl-texture-pixmap-x11.h>
 #include <gdk/gdk.h> /* for gdk_rectangle_union() */
 
@@ -61,9 +66,6 @@ struct _MetaWindowActorPrivate
   Damage            damage;
 
   guint8            opacity;
-  guint8            shadow_opacity;
-
-  gchar *           desc;
 
   /* If the window is shaped, a region that matches the shape */
   cairo_region_t   *shape_region;
@@ -95,32 +97,49 @@ struct _MetaWindowActorPrivate
   gint              map_in_progress;
   gint              destroy_in_progress;
 
+  /* List of FrameData for recent frames */
+  GList            *frames;
+
   guint		    visible                : 1;
-  guint		    mapped                 : 1;
   guint		    argb32                 : 1;
   guint		    disposed               : 1;
   guint             redecorating           : 1;
 
   guint		    needs_damage_all       : 1;
   guint		    received_damage        : 1;
+  guint             repaint_scheduled      : 1;
+
+  /* If set, the client needs to be sent a _NET_WM_FRAME_DRAWN
+   * client message using the most recent frame in ->frames */
+  guint             needs_frame_drawn      : 1;
 
   guint		    needs_pixmap           : 1;
   guint             needs_reshape          : 1;
   guint             recompute_focused_shadow   : 1;
   guint             recompute_unfocused_shadow : 1;
   guint		    size_changed           : 1;
+  guint             updates_frozen         : 1;
 
   guint		    needs_destroy	   : 1;
 
   guint             no_shadow              : 1;
-
-  guint             no_more_x_calls        : 1;
 
   guint             unredirected           : 1;
 
   /* This is used to detect fullscreen windows that need to be unredirected */
   guint             full_damage_frames_count;
   guint             does_full_damage  : 1;
+
+  guint             has_desat_effect : 1;
+};
+
+typedef struct _FrameData FrameData;
+
+struct _FrameData
+{
+  int64_t frame_counter;
+  guint64 sync_request_serial;
+  gint64 frame_drawn_time;
 };
 
 enum
@@ -158,13 +177,17 @@ static gboolean meta_window_actor_get_paint_volume (ClutterActor       *actor,
 static void     meta_window_actor_detach     (MetaWindowActor *self);
 static gboolean meta_window_actor_has_shadow (MetaWindowActor *self);
 
-static void meta_window_actor_clear_shape_region    (MetaWindowActor *self);
-static void meta_window_actor_clear_bounding_region (MetaWindowActor *self);
-static void meta_window_actor_clear_shadow_clip     (MetaWindowActor *self);
+static void meta_window_actor_handle_updates (MetaWindowActor *self);
 
 static void check_needs_reshape (MetaWindowActor *self);
 
-G_DEFINE_TYPE (MetaWindowActor, meta_window_actor, CLUTTER_TYPE_GROUP);
+G_DEFINE_TYPE (MetaWindowActor, meta_window_actor, CLUTTER_TYPE_ACTOR);
+
+static void
+frame_data_free (FrameData *frame)
+{
+  g_slice_free (FrameData, frame);
+}
 
 static void
 meta_window_actor_class_init (MetaWindowActorClass *klass)
@@ -259,6 +282,41 @@ meta_window_actor_init (MetaWindowActor *self)
 						   MetaWindowActorPrivate);
   priv->opacity = 0xff;
   priv->shadow_class = NULL;
+  priv->has_desat_effect = FALSE;
+}
+
+static void
+maybe_desaturate_window (ClutterActor *actor)
+{
+  MetaWindowActor *window = META_WINDOW_ACTOR (actor);
+  MetaWindowActorPrivate *priv = window->priv;
+
+  guint8 opacity = clutter_actor_get_opacity (actor);
+
+  if (opacity < 255)
+    {
+      if (priv->has_desat_effect)
+        {
+          return;
+        }
+      else
+        {
+          ClutterEffect *effect = clutter_desaturate_effect_new (0.0);
+          clutter_actor_add_effect_with_name (actor, "desaturate-for-transparency", effect);
+          priv->has_desat_effect = TRUE;
+        }
+    }
+  else
+    {
+      /* This is will tend to get called fairly often - opening new windows, various
+         events on the window, like minimizing... but it's inexpensive - if the ClutterActor
+         priv->effects is NULL, it simply returns.  By default cinnamon and muffin add no
+         other effects except the special case of dimmed windows (attached modal dialogs), which
+         isn't a frequent occurrence. */
+
+      clutter_actor_remove_effect_by_name (actor, "desaturate-for-transparency");
+      priv->has_desat_effect = FALSE;
+    }
 }
 
 static void
@@ -299,9 +357,6 @@ window_decorated_notify (MetaWindow *mw,
       priv->damage = None;
     }
 
-  g_free (priv->desc);
-  priv->desc = NULL;
-
   priv->xwindow = new_xwindow;
 
   /*
@@ -316,6 +371,14 @@ window_appears_focused_notify (MetaWindow *mw,
                                gpointer    data)
 {
   clutter_actor_queue_redraw (CLUTTER_ACTOR (data));
+}
+
+static void
+clutter_actor_opacity_notify (ClutterActor *actor,
+                              GParamSpec   *arg1m,
+                              gpointer      data)
+{
+  maybe_desaturate_window (actor);
 }
 
 static void
@@ -342,7 +405,7 @@ meta_window_actor_constructed (GObject *object)
     {
       priv->actor = meta_shaped_texture_new ();
 
-      clutter_container_add_actor (CLUTTER_CONTAINER (self), priv->actor);
+      clutter_actor_add_child (CLUTTER_ACTOR (self), priv->actor);
 
       /*
        * Since we are holding a pointer to this actor independently of the
@@ -357,6 +420,8 @@ meta_window_actor_constructed (GObject *object)
                         G_CALLBACK (window_decorated_notify), self);
       g_signal_connect (window, "notify::appears-focused",
                         G_CALLBACK (window_appears_focused_notify), self);
+      g_signal_connect (self, "notify::opacity",
+                        G_CALLBACK (clutter_actor_opacity_notify), NULL);
     }
   else
     {
@@ -364,10 +429,11 @@ meta_window_actor_constructed (GObject *object)
        * This is the case where existing window is gaining/loosing frame.
        * Just ensure the actor is top most (i.e., above shadow).
        */
-      clutter_actor_raise_top (priv->actor);
+      clutter_actor_set_child_above_sibling (CLUTTER_ACTOR (self), priv->actor, NULL);
     }
 
   meta_window_actor_update_opacity (self);
+  maybe_desaturate_window (CLUTTER_ACTOR (self));
 
   priv->shape_region = cairo_region_create();
 }
@@ -394,33 +460,14 @@ meta_window_actor_dispose (GObject *object)
 
   meta_window_actor_detach (self);
 
-  meta_window_actor_clear_shape_region (self);
-  meta_window_actor_clear_bounding_region (self);
-  meta_window_actor_clear_shadow_clip (self);
+  g_clear_pointer (&priv->shape_region, cairo_region_destroy);
+  g_clear_pointer (&priv->bounding_region, cairo_region_destroy);
+  g_clear_pointer (&priv->shadow_clip, cairo_region_destroy);
 
-  if (priv->shadow_class != NULL)
-    {
-      g_free (priv->shadow_class);
-      priv->shadow_class = NULL;
-    }
-
-  if (priv->focused_shadow != NULL)
-    {
-      meta_shadow_unref (priv->focused_shadow);
-      priv->focused_shadow = NULL;
-    }
-
-  if (priv->unfocused_shadow != NULL)
-    {
-      meta_shadow_unref (priv->unfocused_shadow);
-      priv->unfocused_shadow = NULL;
-    }
-
-  if (priv->shadow_shape != NULL)
-    {
-      meta_window_shape_unref (priv->shadow_shape);
-      priv->shadow_shape = NULL;
-    }
+  g_clear_pointer (&priv->shadow_class, g_free);
+  g_clear_pointer (&priv->focused_shadow, meta_shadow_unref);
+  g_clear_pointer (&priv->unfocused_shadow, meta_shadow_unref);
+  g_clear_pointer (&priv->shadow_shape, meta_window_shape_unref);
 
   if (priv->damage != None)
     {
@@ -433,17 +480,12 @@ meta_window_actor_dispose (GObject *object)
 
   info->windows = g_list_remove (info->windows, (gconstpointer) self);
 
-  if (priv->window)
-    {
-      g_object_unref (priv->window);
-      priv->window = NULL;
-    }
+  g_clear_object (&priv->window);
 
   /*
    * Release the extra reference we took on the actor.
    */
-  g_object_unref (priv->actor);
-  priv->actor = NULL;
+  g_clear_object (&priv->actor);
 
   G_OBJECT_CLASS (meta_window_actor_parent_class)->dispose (object);
 }
@@ -453,9 +495,7 @@ meta_window_actor_finalize (GObject *object)
 {
   MetaWindowActor        *self = META_WINDOW_ACTOR (object);
   MetaWindowActorPrivate *priv = self->priv;
-
-  g_free (priv->desc);
-
+  g_list_free_full (priv->frames, (GDestroyNotify) frame_data_free);
   G_OBJECT_CLASS (meta_window_actor_parent_class)->finalize (object);
 }
 
@@ -704,7 +744,7 @@ meta_window_actor_get_paint_volume (ClutterActor       *actor,
 
   /* The paint volume is computed before paint functions are called
    * so our bounds might not be updated yet. Force an update. */
-  meta_window_actor_pre_paint (self);
+  meta_window_actor_handle_updates (self);
 
   meta_window_actor_get_shape_bounds (self, &bounds);
 
@@ -847,32 +887,13 @@ meta_window_actor_get_texture (MetaWindowActor *self)
 gboolean
 meta_window_actor_is_destroyed (MetaWindowActor *self)
 {
-  return self->priv->disposed;
+  return self->priv->disposed || self->priv->needs_destroy;
 }
 
 gboolean
 meta_window_actor_is_override_redirect (MetaWindowActor *self)
 {
   return meta_window_is_override_redirect (self->priv->window);
-}
-
-const char *meta_window_actor_get_description (MetaWindowActor *self)
-{
-  /*
-   * For windows managed by the WM, we just defer to the WM for the window
-   * description. For override-redirect windows, we create the description
-   * ourselves, but only on demand.
-   */
-  if (self->priv->window)
-    return meta_window_get_description (self->priv->window);
-
-  if (G_UNLIKELY (self->priv->desc == NULL))
-    {
-      self->priv->desc = g_strdup_printf ("Override Redirect (0x%x)",
-                                         (guint) self->priv->xwindow);
-    }
-
-  return self->priv->desc;
 }
 
 /**
@@ -884,7 +905,7 @@ const char *meta_window_actor_get_description (MetaWindowActor *self)
  * This function is deprecated  and should not be used in newly written code;
  * meta_window_get_workspace() instead.
  *
- * Return value: (transfer none): index of workspace on which this window is
+ * Return value: index of workspace on which this window is
  * located.
  */
 gint
@@ -939,7 +960,7 @@ meta_window_actor_damage_all (MetaWindowActor *self)
 
   texture = meta_shaped_texture_get_texture (META_SHAPED_TEXTURE (priv->actor));
 
-  if (!priv->mapped || priv->needs_pixmap)
+  if (priv->needs_pixmap)
     return;
 
   meta_shaped_texture_update_area (META_SHAPED_TEXTURE (priv->actor),
@@ -948,6 +969,7 @@ meta_window_actor_damage_all (MetaWindowActor *self)
                                    cogl_texture_get_height (texture));
 
   priv->needs_damage_all = FALSE;
+  priv->repaint_scheduled = TRUE;
 }
 
 static void
@@ -965,12 +987,60 @@ meta_window_actor_thaw (MetaWindowActor *self)
   if (self->priv->freeze_count)
     return;
 
+  /* We sometimes ignore moves and resizes on frozen windows */
+  meta_window_actor_sync_actor_geometry (self, FALSE);
+
+  /* We do this now since we might be going right back into the
+   * frozen state */
+  meta_window_actor_handle_updates (self);
+
   /* Since we ignore damage events while a window is frozen for certain effects
    * we may need to issue an update_area() covering the whole pixmap if we
    * don't know what real damage has happened. */
-
   if (self->priv->needs_damage_all)
     meta_window_actor_damage_all (self);
+}
+
+void
+meta_window_actor_queue_frame_drawn (MetaWindowActor *self,
+                                     gboolean         no_delay_frame)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  FrameData *frame;
+
+  if (meta_window_actor_is_destroyed (self))
+    return;
+
+  frame = g_slice_new0 (FrameData);
+
+  priv->needs_frame_drawn = TRUE;
+
+  frame->sync_request_serial = priv->window->sync_request_serial;
+
+  priv->frames = g_list_prepend (priv->frames, frame);
+
+  if (no_delay_frame)
+    {
+      ClutterActor *stage = clutter_actor_get_stage (CLUTTER_ACTOR (self));
+      clutter_stage_skip_sync_delay (CLUTTER_STAGE (stage));
+    }
+
+  if (!priv->repaint_scheduled)
+    {
+      /* A frame was marked by the client without actually doing any
+       * damage, or while we had the window frozen (e.g. during an
+       * interactive resize.) We need to make sure that the
+       * pre_paint/post_paint functions get called, enabling us to
+       * send a _NET_WM_FRAME_DRAWN. We do a 1-pixel redraw to get
+       * consistent timing with non-empty frames.
+       */
+      if (!priv->needs_pixmap)
+        {
+          const cairo_rectangle_int_t clip = { 0, 0, 1, 1 };
+          clutter_actor_queue_redraw_with_clip (priv->actor, &clip);
+          priv->repaint_scheduled = TRUE;
+        }
+    }
 }
 
 LOCAL_SYMBOL gboolean
@@ -984,6 +1054,12 @@ meta_window_actor_effect_in_progress (MetaWindowActor *self)
 	  self->priv->destroy_in_progress);
 }
 
+static gboolean
+is_frozen (MetaWindowActor *self)
+{
+  return self->priv->freeze_count ? TRUE : FALSE;
+}
+
 static void
 meta_window_actor_queue_create_pixmap (MetaWindowActor *self)
 {
@@ -991,7 +1067,7 @@ meta_window_actor_queue_create_pixmap (MetaWindowActor *self)
 
   priv->needs_pixmap = TRUE;
 
-  if (!priv->mapped)
+  if (is_frozen (self))
     return;
 
   /* This will cause the compositor paint function to be run
@@ -1086,10 +1162,7 @@ meta_window_actor_after_effects (MetaWindowActor *self)
     }
 
   meta_window_actor_sync_visibility (self);
-  meta_window_actor_sync_actor_position (self);
-
-  if (!meta_window_is_mapped (priv->window))
-    meta_window_actor_detach (self);
+  meta_window_actor_sync_actor_geometry (self, FALSE);
 
   if (priv->needs_pixmap)
     clutter_actor_queue_redraw (priv->actor);
@@ -1211,6 +1284,9 @@ meta_window_actor_should_unredirect (MetaWindowActor *self)
   MetaWindow *metaWindow = meta_window_actor_get_meta_window (self);
   MetaWindowActorPrivate *priv = self->priv;
 
+  if (meta_window_actor_is_destroyed (self))
+    return FALSE;
+
   if (meta_window_requested_dont_bypass_compositor (metaWindow))
     return FALSE;
 
@@ -1226,16 +1302,13 @@ meta_window_actor_should_unredirect (MetaWindowActor *self)
   if (!meta_window_is_monitor_sized (metaWindow))
     return FALSE;
 
-  if (!meta_prefs_get_unredirect_fullscreen_windows())
-    return FALSE;
-
   if (meta_window_requested_bypass_compositor (metaWindow))
     return TRUE;
 
   if (meta_window_is_override_redirect (metaWindow))
     return TRUE;
 
-  if (priv->does_full_damage)
+  if (priv->does_full_damage && meta_prefs_get_unredirect_fullscreen_windows ())
     return TRUE;
 
   return FALSE;
@@ -1271,7 +1344,6 @@ LOCAL_SYMBOL void
 meta_window_actor_destroy (MetaWindowActor *self)
 {
   MetaWindow	      *window;
-  MetaCompScreen      *info;
   MetaWindowActorPrivate *priv;
   MetaWindowType window_type;
 
@@ -1280,13 +1352,6 @@ meta_window_actor_destroy (MetaWindowActor *self)
   window = priv->window;
   window_type = meta_window_get_window_type (window);
   meta_window_set_compositor_private (window, NULL);
-
-  /*
-   * We remove the window from internal lookup hashes and thus any other
-   * unmap events etc fail
-   */
-  info = meta_screen_get_compositor_data (priv->screen);
-  info->windows = g_list_remove (info->windows, (gconstpointer) self);
 
   if (window_type == META_WINDOW_DROPDOWN_MENU ||
       window_type == META_WINDOW_POPUP_MENU ||
@@ -1305,20 +1370,13 @@ meta_window_actor_destroy (MetaWindowActor *self)
 
   priv->needs_destroy = TRUE;
 
-  /*
-   * Once the window destruction is initiated we can no longer perform any
-   * furter X-based operations. For example, if we have a Map effect running,
-   * we cannot query the window geometry once the effect completes. So, flag
-   * this.
-   */
-  priv->no_more_x_calls = TRUE;
-
   if (!meta_window_actor_effect_in_progress (self))
     clutter_actor_destroy (CLUTTER_ACTOR (self));
 }
 
 LOCAL_SYMBOL void
-meta_window_actor_sync_actor_position (MetaWindowActor *self)
+meta_window_actor_sync_actor_geometry (MetaWindowActor *self,
+                                       gboolean         did_placement)
 {
   MetaWindowActorPrivate *priv = self->priv;
   MetaRectangle window_rect;
@@ -1329,10 +1387,23 @@ meta_window_actor_sync_actor_position (MetaWindowActor *self)
       priv->last_height != window_rect.height)
     {
       priv->size_changed = TRUE;
-      meta_window_actor_queue_create_pixmap (self);
-
       priv->last_width = window_rect.width;
       priv->last_height = window_rect.height;
+    }
+
+  /* Normally we want freezing a window to also freeze its position; this allows
+   * windows to atomically move and resize together, either under app control,
+   * or because the user is resizing from the left/top. But on initial placement
+   * we need to assign a position, since immediately after the window
+   * is shown, the map effect will go into effect and prevent further geometry
+   * updates.
+   */
+  if (is_frozen (self) && !did_placement)
+    return;
+
+  if (priv->size_changed)
+    {
+      meta_window_actor_queue_create_pixmap (self);
     }
 
   if (meta_window_actor_effect_in_progress (self))
@@ -1383,7 +1454,7 @@ meta_window_actor_show (MetaWindowActor   *self,
       event == 0 ||
       !start_simple_effect (self, event))
     {
-      clutter_actor_show_all (CLUTTER_ACTOR (self));
+      clutter_actor_show (CLUTTER_ACTOR (self));
       priv->redecorating = FALSE;
     }
 }
@@ -1526,8 +1597,7 @@ meta_window_actor_new (MetaWindow *window)
   MetaWindowActorPrivate *priv;
   MetaFrame		 *frame;
   Window		  top_window;
-  MetaRectangle rectWorkArea[1];
-  MetaRectangle *rectWindow;
+  ClutterActor           *window_group;
 
   frame = meta_window_get_frame (window);
   if (frame)
@@ -1548,43 +1618,33 @@ meta_window_actor_new (MetaWindow *window)
   priv->last_width = -1;
   priv->last_height = -1;
 
-  priv->mapped = meta_window_toplevel_is_mapped (priv->window);
-  if (priv->mapped)
-    meta_window_actor_queue_create_pixmap (self);
+  meta_window_actor_queue_create_pixmap (self);
 
-  meta_window_actor_sync_actor_position (self);
+  meta_window_actor_set_updates_frozen (self,
+                                        meta_window_updates_are_frozen (priv->window));
+
+  /* If a window doesn't start off with updates frozen, we should
+   * we should send a _NET_WM_FRAME_DRAWN immediately after the first drawn.
+   */
+  if (priv->window->extended_sync_request_counter && !priv->updates_frozen)
+    meta_window_actor_queue_frame_drawn (self, FALSE);
+
+  meta_window_actor_sync_actor_geometry (self, priv->window->placed);
 
   /* Hang our compositor window state off the MetaWindow for fast retrieval */
   meta_window_set_compositor_private (window, G_OBJECT (self));
   
-  if (window->type == META_WINDOW_DROPDOWN_MENU ||
-      window->type == META_WINDOW_POPUP_MENU ||
-      window->type == META_WINDOW_COMBO) {
-    clutter_container_add_actor (CLUTTER_CONTAINER (info->top_window_group),
-			       CLUTTER_ACTOR (self));
-  }
-  else if (window->type == META_WINDOW_TOOLTIP) {
-    meta_window_get_work_area_all_monitors(window, rectWorkArea);
-    rectWindow = meta_window_get_rect(window);
-    // move tooltip out of top panel if necessary
-    if (rectWindow->y < rectWorkArea->y) {
-      meta_window_move(window, FALSE, rectWindow->x, rectWorkArea->y);
-    }
-    rectWindow = meta_window_get_rect(window);
-    // move tooltip out of bottom panel if necessary
-    if ((rectWindow->y + rectWindow->height) > (rectWorkArea->y  + rectWorkArea->height)) {
-      meta_window_move(window, FALSE, rectWindow->x, rectWorkArea->y + rectWorkArea->height - rectWindow->height);
-    }
-    clutter_container_add_actor (CLUTTER_CONTAINER (info->top_window_group),
-		       CLUTTER_ACTOR (self));
-  }
-  else if (window->type == META_WINDOW_DESKTOP) {
-    clutter_container_add_actor (CLUTTER_CONTAINER (info->bottom_window_group),
-			       CLUTTER_ACTOR (self));
-  }else{
-    clutter_container_add_actor (CLUTTER_CONTAINER (info->window_group),
-			       CLUTTER_ACTOR (self));
-  }
+  if (window->type == META_WINDOW_DND)
+    window_group = info->window_group;
+  else if (window->layer == META_LAYER_OVERRIDE_REDIRECT)
+    window_group = info->top_window_group;
+  else if (window->type == META_WINDOW_DESKTOP)
+    window_group = info->bottom_window_group;
+  else
+    window_group = info->window_group;
+
+  clutter_actor_add_child (window_group, CLUTTER_ACTOR (self));
+  
   clutter_actor_hide (CLUTTER_ACTOR (self));
 
   /* Initial position in the stack is arbitrary; stacking will be synced
@@ -1593,70 +1653,6 @@ meta_window_actor_new (MetaWindow *window)
   info->windows = g_list_append (info->windows, self);
 
   return self;
-}
-
-LOCAL_SYMBOL void
-meta_window_actor_mapped (MetaWindowActor *self)
-{
-  MetaWindowActorPrivate *priv = self->priv;
-
-  g_return_if_fail (!priv->mapped);
-
-  priv->mapped = TRUE;
-
-  meta_window_actor_queue_create_pixmap (self);
-}
-
-LOCAL_SYMBOL void
-meta_window_actor_unmapped (MetaWindowActor *self)
-{
-  MetaWindowActorPrivate *priv = self->priv;
-
-  g_return_if_fail (priv->mapped);
-
-  priv->mapped = FALSE;
-
-  if (meta_window_actor_effect_in_progress (self))
-    return;
-
-  meta_window_actor_detach (self);
-  priv->needs_pixmap = FALSE;
-}
-
-static void
-meta_window_actor_clear_shape_region (MetaWindowActor *self)
-{
-  MetaWindowActorPrivate *priv = self->priv;
-
-  if (priv->shape_region)
-    {
-      cairo_region_destroy (priv->shape_region);
-      priv->shape_region = NULL;
-    }
-}
-
-static void
-meta_window_actor_clear_bounding_region (MetaWindowActor *self)
-{
-  MetaWindowActorPrivate *priv = self->priv;
-
-  if (priv->bounding_region)
-    {
-      cairo_region_destroy (priv->bounding_region);
-      priv->bounding_region = NULL;
-    }
-}
-
-static void
-meta_window_actor_clear_shadow_clip (MetaWindowActor *self)
-{
-  MetaWindowActorPrivate *priv = self->priv;
-
-  if (priv->shadow_clip)
-    {
-      cairo_region_destroy (priv->shadow_clip);
-      priv->shadow_clip = NULL;
-    }
 }
 
 static void
@@ -1699,7 +1695,7 @@ meta_window_actor_update_bounding_region_and_borders (MetaWindowActor *self,
 
   priv->last_borders = borders;
 
-  meta_window_actor_clear_bounding_region (self);
+  g_clear_pointer (&priv->bounding_region, cairo_region_destroy);
 
   priv->bounding_region = cairo_region_create_rectangle (&bounding_rectangle);
 
@@ -1714,7 +1710,7 @@ meta_window_actor_update_shape_region (MetaWindowActor *self,
 {
   MetaWindowActorPrivate *priv = self->priv;
 
-  meta_window_actor_clear_shape_region (self);
+  g_clear_pointer (&priv->shape_region, cairo_region_destroy);
 
   /* region must be non-null */
   priv->shape_region = region;
@@ -1823,7 +1819,7 @@ meta_window_actor_set_visible_region_beneath (MetaWindowActor *self,
 
   if (appears_focused ? priv->focused_shadow : priv->unfocused_shadow)
     {
-      meta_window_actor_clear_shadow_clip (self);
+      g_clear_pointer (&priv->shadow_clip, cairo_region_destroy);
       priv->shadow_clip = cairo_region_copy (beneath_region);
 
       if (clip_shadow_under_window (self))
@@ -1848,7 +1844,7 @@ meta_window_actor_reset_visible_regions (MetaWindowActor *self)
 
   meta_shaped_texture_set_clip_region (META_SHAPED_TEXTURE (priv->actor),
                                        NULL);
-  meta_window_actor_clear_shadow_clip (self);
+  g_clear_pointer (&priv->shadow_clip, cairo_region_destroy);
 }
 
 static void
@@ -1863,9 +1859,6 @@ check_needs_pixmap (MetaWindowActor *self)
   Window               xwindow  = priv->xwindow;
 
   if (!priv->needs_pixmap)
-    return;
-
-  if (!priv->mapped)
     return;
 
   if (xwindow == meta_screen_get_xroot (screen) ||
@@ -1951,9 +1944,6 @@ check_needs_shadow (MetaWindowActor *self)
   gboolean should_have_shadow;
   gboolean appears_focused;
 
-  if (!priv->mapped)
-    return;
-
   /* Calling meta_window_actor_has_shadow() here at every pre-paint is cheap
    * and avoids the need to explicitly handle window type changes, which
    * we would do if tried to keep track of when we might be adding or removing
@@ -2014,12 +2004,6 @@ check_needs_shadow (MetaWindowActor *self)
     meta_shadow_unref (old_shadow);
 }
 
-static gboolean
-is_frozen (MetaWindowActor *self)
-{
-  return self->priv->freeze_count ? TRUE : FALSE;
-}
-
 LOCAL_SYMBOL void
 meta_window_actor_process_damage (MetaWindowActor    *self,
                                   XDamageNotifyEvent *event)
@@ -2034,8 +2018,8 @@ meta_window_actor_process_damage (MetaWindowActor    *self,
       MetaRectangle window_rect;
       meta_window_get_outer_rect (priv->window, &window_rect);
 
-      if (window_rect.x == event->area.x &&
-          window_rect.y == event->area.y &&
+      if (event->area.x == 0 &&
+          event->area.y == 0 &&
           window_rect.width == event->area.width &&
           window_rect.height == event->area.height)
         priv->full_damage_frames_count++;
@@ -2070,7 +2054,7 @@ meta_window_actor_process_damage (MetaWindowActor    *self,
       return;
     }
 
-  if (!priv->mapped || priv->needs_pixmap)
+  if (priv->needs_pixmap)
     return;
 
   meta_shaped_texture_update_area (META_SHAPED_TEXTURE (priv->actor),
@@ -2078,6 +2062,7 @@ meta_window_actor_process_damage (MetaWindowActor    *self,
                                    event->area.y,
                                    event->area.width,
                                    event->area.height);
+  priv->repaint_scheduled = TRUE;
 }
 
 LOCAL_SYMBOL void
@@ -2224,7 +2209,13 @@ check_needs_reshape (MetaWindowActor *self)
     return;
 
   meta_shaped_texture_set_shape_region (META_SHAPED_TEXTURE (priv->actor), NULL);
-  meta_window_actor_clear_shape_region (self);
+  g_clear_pointer (&priv->shape_region, cairo_region_destroy);;
+
+  if (priv->shadow_shape != NULL)
+    {
+      meta_window_shape_unref (priv->shadow_shape);
+      priv->shadow_shape = NULL;
+    }
 
   meta_frame_calc_borders (priv->window->frame, &borders);
 
@@ -2253,16 +2244,8 @@ check_needs_reshape (MetaWindowActor *self)
       client_area.width = priv->window->rect.width;
       client_area.height = priv->window->rect.height;
 
-      if (priv->window->frame)
-        {
-          client_area.x = borders.total.left;
-          client_area.y = borders.total.top;
-        }
-      else
-        {
-          client_area.x = 0;
-          client_area.y = 0;
-        }
+      client_area.x = borders.total.left;
+      client_area.y = borders.total.top;
 
       /* Punch out client area. */
       cairo_region_subtract_rectangle (region, &client_area);
@@ -2310,17 +2293,15 @@ meta_window_actor_update_shape (MetaWindowActor *self)
   MetaWindowActorPrivate *priv = self->priv;
 
   priv->needs_reshape = TRUE;
-  if (priv->shadow_shape != NULL)
-    {
-      meta_window_shape_unref (priv->shadow_shape);
-      priv->shadow_shape = NULL;
-    }
+
+  if (is_frozen (self))
+    return;
 
   clutter_actor_queue_redraw (priv->actor);
 }
 
 LOCAL_SYMBOL void
-meta_window_actor_pre_paint (MetaWindowActor *self)
+meta_window_actor_handle_updates (MetaWindowActor *self)
 {
   MetaWindowActorPrivate *priv = self->priv;
   MetaScreen          *screen   = priv->screen;
@@ -2346,32 +2327,155 @@ meta_window_actor_pre_paint (MetaWindowActor *self)
       XDamageSubtract (xdisplay, priv->damage, None, None);
       meta_error_trap_pop (display);
 
-      /* We need to make sure that any X drawing that happens before the
-       * XDamageSubtract() above is visible to subsequent GL rendering;
-       * the only standardized way to do this is EXT_x11_sync_object,
-       * which isn't yet widely available. For now, we count on details
-       * of Xorg and the open source drivers, and hope for the best
-       * otherwise.
-       *
-       * Xorg and open source driver specifics:
-       *
-       * The X server makes sure to flush drawing to the kernel before
-       * sending out damage events, but since we use DamageReportBoundingBox
-       * there may be drawing between the last damage event and the
-       * XDamageSubtract() that needs to be flushed as well.
-       *
-       * Xorg always makes sure that drawing is flushed to the kernel
-       * before writing events or responses to the client, so any round trip
-       * request at this point is sufficient to flush the GLX buffers.
-       */
-      XSync (xdisplay, False);
-
       priv->received_damage = FALSE;
     }
 
   check_needs_pixmap (self);
   check_needs_reshape (self);
   check_needs_shadow (self);
+}
+
+void
+meta_window_actor_pre_paint (MetaWindowActor *self)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  GList *l;
+
+  if (meta_window_actor_is_destroyed (self))
+    return;
+
+  meta_window_actor_handle_updates (self);
+
+  for (l = priv->frames; l != NULL; l = l->next)
+    {
+      FrameData *frame = l->data;
+
+      if (frame->frame_counter == 0)
+        {
+          CoglOnscreen *onscreen = COGL_ONSCREEN (cogl_get_draw_framebuffer());
+          frame->frame_counter = cogl_onscreen_get_frame_counter (onscreen);
+        }
+    }
+}
+
+void
+meta_window_actor_post_paint (MetaWindowActor *self)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+
+  priv->repaint_scheduled = FALSE;
+
+  if (meta_window_actor_is_destroyed (self))
+    return;
+
+  if (priv->needs_frame_drawn)
+    {
+      MetaScreen  *screen  = priv->screen;
+      MetaDisplay *display = meta_screen_get_display (screen);
+      Display *xdisplay = meta_display_get_xdisplay (display);
+
+      XClientMessageEvent ev = { 0, };
+
+      FrameData *frame = priv->frames->data;
+
+      frame->frame_drawn_time = meta_compositor_monotonic_time_to_server_time (display,
+                                                                               g_get_monotonic_time ());
+
+      ev.type = ClientMessage;
+      ev.window = meta_window_get_xwindow (priv->window);
+      ev.message_type = display->atom__NET_WM_FRAME_DRAWN;
+      ev.format = 32;
+      ev.data.l[0] = frame->sync_request_serial & G_GUINT64_CONSTANT(0xffffffff);
+      ev.data.l[1] = frame->sync_request_serial >> 32;
+      ev.data.l[2] = frame->frame_drawn_time & G_GUINT64_CONSTANT(0xffffffff);
+      ev.data.l[3] = frame->frame_drawn_time >> 32;
+
+      meta_error_trap_push (display);
+      XSendEvent (xdisplay, ev.window, False, 0, (XEvent*) &ev);
+      XFlush (xdisplay);
+      meta_error_trap_pop (display);
+
+      priv->needs_frame_drawn = FALSE;
+    }
+}
+
+static void
+send_frame_timings (MetaWindowActor  *self,
+                    FrameData        *frame,
+                    CoglFrameInfo    *frame_info,
+                    gint64            presentation_time)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  MetaDisplay *display = meta_screen_get_display (priv->screen);
+  Display *xdisplay = meta_display_get_xdisplay (display);
+  float refresh_rate;
+  int refresh_interval;
+
+  XClientMessageEvent ev = { 0, };
+
+  ev.type = ClientMessage;
+  ev.window = meta_window_get_xwindow (priv->window);
+  ev.message_type = display->atom__NET_WM_FRAME_TIMINGS;
+  ev.format = 32;
+  ev.data.l[0] = frame->sync_request_serial & G_GUINT64_CONSTANT(0xffffffff);
+  ev.data.l[1] = frame->sync_request_serial >> 32;
+
+  refresh_rate = cogl_frame_info_get_refresh_rate (frame_info);
+  /* 0.0 is a flag for not known, but sanity-check against other odd numbers */
+  if (refresh_rate >= 1.0)
+    refresh_interval = (int) (0.5 + 1000000 / refresh_rate);
+  else
+    refresh_interval = 0;
+
+  if (presentation_time != 0)
+    {
+      gint64 presentation_time_server = meta_compositor_monotonic_time_to_server_time (display,
+                                                                                       presentation_time);
+      gint64 presentation_time_offset = presentation_time_server - frame->frame_drawn_time;
+      if (presentation_time_offset == 0)
+        presentation_time_offset = 1;
+
+      if ((gint32)presentation_time_offset == presentation_time_offset)
+        ev.data.l[2] = presentation_time_offset;
+    }
+
+  ev.data.l[3] = refresh_interval;
+  ev.data.l[4] = 1000 * META_SYNC_DELAY;
+
+  meta_error_trap_push (display);
+  XSendEvent (xdisplay, ev.window, False, 0, (XEvent*) &ev);
+  XFlush (xdisplay);
+  meta_error_trap_pop (display);
+}
+
+void
+meta_window_actor_frame_complete (MetaWindowActor *self,
+                                  CoglFrameInfo   *frame_info,
+                                  gint64           presentation_time)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  GList *l;
+
+  if (meta_window_actor_is_destroyed (self))
+    return;
+
+  for (l = priv->frames; l;)
+    {
+      GList *l_next = l->next;
+      FrameData *frame = l->data;
+
+      if (frame->frame_counter == cogl_frame_info_get_frame_counter (frame_info))
+        {
+          if (frame->frame_drawn_time != 0)
+            {
+              priv->frames = g_list_delete_link (priv->frames, l);
+              send_frame_timings (self, frame, frame_info, presentation_time);
+              frame_data_free (frame);
+            }
+        }
+
+      l = l_next;
+    }
 }
 
 LOCAL_SYMBOL void
@@ -2381,6 +2485,10 @@ meta_window_actor_invalidate_shadow (MetaWindowActor *self)
 
   priv->recompute_focused_shadow = TRUE;
   priv->recompute_unfocused_shadow = TRUE;
+
+  if (is_frozen (self))
+    return;
+
   clutter_actor_queue_redraw (CLUTTER_ACTOR (self));
 }
 
@@ -2405,4 +2513,22 @@ meta_window_actor_update_opacity (MetaWindowActor *self)
 
   self->priv->opacity = opacity;
   clutter_actor_set_opacity (self->priv->actor, opacity);
+}
+
+void
+meta_window_actor_set_updates_frozen (MetaWindowActor *self,
+                                      gboolean         updates_frozen)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+
+  updates_frozen = updates_frozen != FALSE;
+
+  if (priv->updates_frozen != updates_frozen)
+    {
+      priv->updates_frozen = updates_frozen;
+      if (updates_frozen)
+        meta_window_actor_freeze (self);
+      else
+        meta_window_actor_thaw (self);
+    }
 }
